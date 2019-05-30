@@ -37,6 +37,18 @@ fn main() {
         .cpp(true)
         .compile("baz");
 
+    // Test compilation of C++11 with Apple Clang/LLVM. Versions of Xcode including
+    // 9.4.1 (approximately) and older fail when passed the following flags:
+    // -stdlib=libc++ --target=x86_64-apple-darwin.
+    if target.contains("darwin") {
+        cc::Build::new()
+            .file("src/cxx11_clang.cpp")
+            .cpp(true)
+            .target(&target)
+            .compiler("clang++")
+            .compile("cxx11_clang");
+    }
+
     if target.contains("windows") {
         cc::Build::new().file("src/windows.c").compile("windows");
     }
