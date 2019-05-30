@@ -46,9 +46,9 @@ jobs:
       matrix:
         x86_64:
           TARGET: x86_64-apple-darwin
-        x86_64 Xcode 8.3.3:
+        x86_64 Xcode 9.4:
           TARGET: x86_64-apple-darwin
-          DEVELOPER_DIR: '/Applications/Xcode_8.3.3.app'
+          DEVELOPER_DIR: '/Applications/Xcode_9.4.app'
         aarch64-ios:
           TARGET: aarch64-apple-ios
           NO_RUN: --no-run
