@@ -4,10 +4,10 @@ steps:
       choco install msys2 --no-progress --params="/InstallDir:c:\msys64 /NoUpdate /NoPath"
       @echo ##vso[task.prependpath]c:\msys64\usr\bin
       @echo ##vso[task.prependpath]c:\msys64\mingw%BITS%\bin
-      echo %PATH%
     displayName: Install MSYS2
 
   - script: |
+      echo %PATH%
       pacman -Syyuu --noconfirm --noprogressbar --ask 20
       pacman -Syu --noconfirm --noprogressbar
     displayName: Update MSYS2
