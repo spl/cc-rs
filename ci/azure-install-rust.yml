@@ -12,7 +12,7 @@ steps:
 
   - script: |
       pacman -S --noconfirm --needed mingw-w64-%ARCH%-rust
-    displayName: Install mingw-w64-%ARCH%-rusr
+    displayName: Install mingw-w64-%ARCH%-rust
 
   - script: |
         @echo ##vso[task.prependpath]c:\msys64\mingw%BITS%\bin
