@@ -1,18 +1,24 @@
 #![allow(dead_code)]
 
 use std::env;
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::io::prelude::*;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use cc;
 use tempdir::TempDir;
 
+/// This struct contains all that is required for running tests with a set of executables in a
+/// temporary directory.
 pub struct Test {
-    pub td: TempDir,
-    pub gcc: PathBuf,
-    pub msvc: bool,
+    /// This temporary directory is created when the `Test` is created and is dropped when the
+    /// `Test` is dropped.
+    dir: TempDir,
+    /// The path to a stub executable that doesn't do anything else other than write its arguments
+    /// to a file.
+    stub: PathBuf,
+    msvc: bool,
 }
 
 pub struct Execution {
@@ -20,39 +26,90 @@ pub struct Execution {
 }
 
 impl Test {
-    pub fn new() -> Test {
-        let mut gcc = PathBuf::from(env::current_exe().unwrap());
-        gcc.pop();
-        if gcc.ends_with("deps") {
-            gcc.pop();
+    fn new() -> Test {
+        let mut stub = PathBuf::from(env::current_exe().unwrap());
+        stub.pop();
+        if stub.ends_with("deps") {
+            stub.pop();
         }
-        gcc.push(format!("gcc-shim{}", env::consts::EXE_SUFFIX));
+        // TODO: Rename gcc-shim to stub
+        stub.push(format!("gcc-shim{}", env::consts::EXE_SUFFIX));
         Test {
-            td: TempDir::new("gcc-test").unwrap(),
-            gcc: gcc,
+            dir: TempDir::new("gcc-test").unwrap(),
+            stub: stub,
             msvc: false,
         }
     }
 
-    pub fn gnu() -> Test {
+    /// Use the "traditional" toolchain usually available on Unix systems.
+    pub fn trad() -> Test {
         let t = Test::new();
-        t.shim("cc").shim("c++").shim("ar");
+        t.stub("cc").stub("c++").stub("ar");
         t
     }
 
+    /// Use the GNU toolchain.
+    pub fn gnu() -> Test {
+        let t = Test::new();
+        t.stub("gcc").stub("g++").stub("ar");
+        t
+    }
+
+    /// Use the Clang/LLVM toolchain.
+    pub fn clang() -> Test {
+        let t = Test::new();
+        t.stub("clang").stub("clang++").stub("ar");
+        t
+    }
+
+    /// Use the Visual Studio toolchain.
     pub fn msvc() -> Test {
         let mut t = Test::new();
-        t.shim("cl").shim("lib.exe");
+        t.stub("cl").stub("lib.exe");
         t.msvc = true;
         t
     }
 
-    pub fn shim(&self, name: &str) -> &Test {
+    /// The path of the test directory.
+    pub fn dir(&self) -> &Path {
+        self.dir.path()
+    }
+
+    /// Create a stub executable.
+    pub fn stub(&self, name: &str) -> &Test {
         let fname = format!("{}{}", name, env::consts::EXE_SUFFIX);
-        fs::hard_link(&self.gcc, self.td.path().join(&fname))
-            .or_else(|_| fs::copy(&self.gcc, self.td.path().join(&fname)).map(|_| ()))
+        fs::hard_link(&self.stub, self.dir().join(&fname))
+            .or_else(|_| fs::copy(&self.stub, self.dir().join(&fname)).map(|_| ()))
             .unwrap();
         self
+    }
+
+    /// Initialize a `cc::Build` with the default host and target of `x86_64-unknown-linux-gnu` as
+    /// well as other default options.
+    pub fn default(&self) -> cc::Build {
+        self.target("x86_64-unknown-linux-gnu")
+    }
+
+    /// Initialize a `cc::Build` with the same host and target as well as other default options.
+    pub fn target(&self, target: &str) -> cc::Build {
+        self.host_target(target, target)
+    }
+
+    /// Initialize a `cc::Build` with the given host and target as well as other default options.
+    pub fn host_target(&self, host: &str, target: &str) -> cc::Build {
+        let mut cfg = cc::Build::new();
+        cfg.host(host)
+            .target(target)
+            .opt_level(2)
+            .debug(false)
+            .out_dir(self.dir())
+            .__set_env("PATH", self.dir())
+            .__set_env("GCCTEST_OUT_DIR", self.dir());
+        if target.contains("msvc") {
+            cfg.compiler(self.dir().join("cl"));
+            cfg.archiver(self.dir().join("lib.exe"));
+        }
+        cfg
     }
 
     pub fn gcc(&self) -> cc::Build {
@@ -67,25 +124,19 @@ impl Test {
             .host(target)
             .opt_level(2)
             .debug(false)
-            .out_dir(self.td.path())
-            .__set_env("PATH", self.path())
-            .__set_env("GCCTEST_OUT_DIR", self.td.path());
+            .out_dir(self.dir())
+            .__set_env("PATH", self.dir())
+            .__set_env("GCCTEST_OUT_DIR", self.dir());
         if self.msvc {
-            cfg.compiler(self.td.path().join("cl"));
-            cfg.archiver(self.td.path().join("lib.exe"));
+            cfg.compiler(self.dir().join("cl"));
+            cfg.archiver(self.dir().join("lib.exe"));
         }
         cfg
     }
 
-    fn path(&self) -> OsString {
-        let mut path = env::split_paths(&env::var_os("PATH").unwrap()).collect::<Vec<_>>();
-        path.insert(0, self.td.path().to_owned());
-        env::join_paths(path).unwrap()
-    }
-
     pub fn cmd(&self, i: u32) -> Execution {
         let mut s = String::new();
-        File::open(self.td.path().join(format!("out{}", i)))
+        File::open(self.dir().join(format!("out{}", i)))
             .unwrap()
             .read_to_string(&mut s)
             .unwrap();

@@ -8,8 +8,8 @@ mod support;
 
 #[test]
 fn gnu_smoke() {
-    let test = Test::gnu();
-    test.gcc().file("foo.c").compile("foo");
+    let test = Test::trad();
+    test.default().file("foo.c").compile("foo");
 
     test.cmd(0)
         .must_have("-O2")
@@ -18,21 +18,24 @@ fn gnu_smoke() {
         .must_have("-c")
         .must_have("-ffunction-sections")
         .must_have("-fdata-sections");
-    test.cmd(1).must_have(test.td.path().join("foo.o"));
+    test.cmd(1).must_have(test.dir().join("foo.o"));
 }
 
 #[test]
 fn gnu_opt_level_1() {
-    let test = Test::gnu();
-    test.gcc().opt_level(1).file("foo.c").compile("foo");
+    let test = Test::trad();
+    test.default().opt_level(1).file("foo.c").compile("foo");
 
     test.cmd(0).must_have("-O1").must_not_have("-O2");
 }
 
 #[test]
 fn gnu_opt_level_s() {
-    let test = Test::gnu();
-    test.gcc().opt_level_str("s").file("foo.c").compile("foo");
+    let test = Test::trad();
+    test.default()
+        .opt_level_str("s")
+        .file("foo.c")
+        .compile("foo");
 
     test.cmd(0)
         .must_have("-Os")
@@ -44,15 +47,15 @@ fn gnu_opt_level_s() {
 
 #[test]
 fn gnu_debug() {
-    let test = Test::gnu();
-    test.gcc().debug(true).file("foo.c").compile("foo");
+    let test = Test::trad();
+    test.default().debug(true).file("foo.c").compile("foo");
     test.cmd(0).must_have("-g");
 }
 
 #[test]
 fn gnu_warnings_into_errors() {
-    let test = Test::gnu();
-    test.gcc()
+    let test = Test::trad();
+    test.default()
         .warnings_into_errors(true)
         .file("foo.c")
         .compile("foo");
@@ -62,8 +65,8 @@ fn gnu_warnings_into_errors() {
 
 #[test]
 fn gnu_warnings() {
-    let test = Test::gnu();
-    test.gcc()
+    let test = Test::trad();
+    test.default()
         .warnings(true)
         .flag("-Wno-missing-field-initializers")
         .file("foo.c")
@@ -74,8 +77,8 @@ fn gnu_warnings() {
 
 #[test]
 fn gnu_extra_warnings0() {
-    let test = Test::gnu();
-    test.gcc()
+    let test = Test::trad();
+    test.default()
         .warnings(true)
         .extra_warnings(false)
         .flag("-Wno-missing-field-initializers")
@@ -87,8 +90,8 @@ fn gnu_extra_warnings0() {
 
 #[test]
 fn gnu_extra_warnings1() {
-    let test = Test::gnu();
-    test.gcc()
+    let test = Test::trad();
+    test.default()
         .warnings(false)
         .extra_warnings(true)
         .flag("-Wno-missing-field-initializers")
@@ -100,8 +103,8 @@ fn gnu_extra_warnings1() {
 
 #[test]
 fn gnu_warnings_overridable() {
-    let test = Test::gnu();
-    test.gcc()
+    let test = Test::trad();
+    test.default()
         .warnings(true)
         .flag("-Wno-missing-field-initializers")
         .file("foo.c")
@@ -114,8 +117,8 @@ fn gnu_warnings_overridable() {
 #[test]
 fn gnu_no_warnings_if_cflags() {
     env::set_var("CFLAGS", "-Wflag-does-not-exist");
-    let test = Test::gnu();
-    test.gcc().file("foo.c").compile("foo");
+    let test = Test::trad();
+    test.default().file("foo.c").compile("foo");
 
     test.cmd(0).must_not_have("-Wall").must_not_have("-Wextra");
     env::set_var("CFLAGS", "");
@@ -124,153 +127,149 @@ fn gnu_no_warnings_if_cflags() {
 #[test]
 fn gnu_no_warnings_if_cxxflags() {
     env::set_var("CXXFLAGS", "-Wflag-does-not-exist");
-    let test = Test::gnu();
-    test.gcc().file("foo.c").compile("foo");
+    let test = Test::trad();
+    test.default().file("foo.c").compile("foo");
 
     test.cmd(0).must_not_have("-Wall").must_not_have("-Wextra");
     env::set_var("CXXFLAGS", "");
 }
 
 #[test]
-fn gnu_x86_64() {
-    for vendor in &["unknown-linux-gnu", "apple-darwin"] {
-        let target = format!("x86_64-{}", vendor);
-        let test = Test::gnu();
-        test.gcc()
-            .target(&target)
-            .host(&target)
-            .file("foo.c")
-            .compile("foo");
-
-        test.cmd(0).must_have("-fPIC").must_have("-m64");
-    }
+fn trad_x86_64_defaults() {
+    let test = Test::trad();
+    test.target("x86_64-unknown-linux-gnu")
+        .file("foo.c")
+        .compile("foo");
+    test.cmd(0).must_have("-m64").must_have("-fPIC");
 }
 
 #[test]
-fn gnu_x86_64_no_pic() {
-    for vendor in &["unknown-linux-gnu", "apple-darwin"] {
-        let target = format!("x86_64-{}", vendor);
-        let test = Test::gnu();
-        test.gcc()
+fn clang_x86_64_defaults() {
+    let test = Test::clang();
+    test.target("x86_64-apple-darwin")
+        .file("foo.c")
+        .compile("foo");
+    test.cmd(0).must_not_have("-m64").must_have("-fPIC");
+}
+
+#[test]
+fn no_pic() {
+    fn run(test: Test, arch: &str, vendor_os: &str) {
+        test.target(&format!("{}-{}", arch, vendor_os))
             .pic(false)
-            .target(&target)
-            .host(&target)
             .file("foo.c")
             .compile("foo");
-
         test.cmd(0).must_not_have("-fPIC");
     }
-}
-
-#[test]
-fn gnu_i686() {
-    for vendor in &["unknown-linux-gnu", "apple-darwin"] {
-        let target = format!("i686-{}", vendor);
-        let test = Test::gnu();
-        test.gcc()
-            .target(&target)
-            .host(&target)
-            .file("foo.c")
-            .compile("foo");
-
-        test.cmd(0).must_have("-m32");
+    for arch in &["x86_64", "i686"] {
+        run(Test::trad(), arch, "unknown-linux-gnu");
+        run(Test::clang(), arch, "apple-darwin");
     }
 }
 
 #[test]
-fn gnu_i686_pic() {
-    for vendor in &["unknown-linux-gnu", "apple-darwin"] {
-        let target = format!("i686-{}", vendor);
-        let test = Test::gnu();
-        test.gcc()
-            .pic(true)
-            .target(&target)
-            .host(&target)
-            .file("foo.c")
-            .compile("foo");
-
-        test.cmd(0).must_have("-fPIC");
-    }
+fn trad_i686_defaults() {
+    let test = Test::trad();
+    test.target("i686-unknown-linux-gnu")
+        .file("foo.c")
+        .compile("foo");
+    test.cmd(0).must_have("-m32").must_have("-fPIC");
 }
 
 #[test]
-fn gnu_x86_64_no_plt() {
-    let target = "x86_64-unknown-linux-gnu";
-    let test = Test::gnu();
-    test.gcc()
-        .pic(true)
+fn clang_i686_defaults() {
+    let test = Test::clang();
+    test.target("i686-apple-darwin")
+        .file("foo.c")
+        .compile("foo");
+    test.cmd(0).must_not_have("-m32").must_have("-fPIC");
+}
+
+#[test]
+fn trad_x86_64_no_plt() {
+    let test = Test::trad();
+    test.target("x86_64-unknown-linux-gnu")
         .use_plt(false)
-        .target(&target)
-        .host(&target)
         .file("foo.c")
         .compile("foo");
     test.cmd(0).must_have("-fno-plt");
 }
 
 #[test]
-fn gnu_set_stdlib() {
-    let test = Test::gnu();
-    test.gcc()
+fn trad_cpp_set_stdlib() {
+    let test = Test::trad();
+    test.target("x86_64-unknown-linux-gnu")
+        .cpp(true)
         .cpp_set_stdlib(Some("foo"))
         .file("foo.c")
         .compile("foo");
-
-    test.cmd(0).must_not_have("-stdlib=foo");
+    test.cmd(0).must_have("-stdlib=libfoo");
 }
 
 #[test]
-fn gnu_include() {
-    let test = Test::gnu();
-    test.gcc().include("foo/bar").file("foo.c").compile("foo");
+fn trad_cpp_set_stdlib_no_cpp() {
+    let test = Test::trad();
+    test.target("x86_64-unknown-linux-gnu")
+        .cpp_set_stdlib(Some("foo"))
+        .file("foo.c")
+        .compile("foo");
+    test.cmd(0).must_not_have("-stdlib=libfoo");
+}
 
+#[test]
+fn trad_include() {
+    let test = Test::trad();
+    test.target("x86_64-unknown-linux-gnu")
+        .include("foo/bar")
+        .file("foo.c")
+        .compile("foo");
     test.cmd(0).must_have("-I").must_have("foo/bar");
 }
 
 #[test]
-fn gnu_define() {
-    let test = Test::gnu();
-    test.gcc()
+fn trad_define() {
+    let test = Test::trad();
+    test.target("x86_64-unknown-linux-gnu")
         .define("FOO", "bar")
         .define("BAR", None)
         .file("foo.c")
         .compile("foo");
-
     test.cmd(0).must_have("-DFOO=bar").must_have("-DBAR");
 }
 
 #[test]
-fn gnu_compile_assembly() {
-    let test = Test::gnu();
-    test.gcc().file("foo.S").compile("foo");
+fn trad_compile_assembly() {
+    let test = Test::trad();
+    test.target("x86_64-unknown-linux-gnu")
+        .file("foo.S")
+        .compile("foo");
     test.cmd(0).must_have("foo.S");
 }
 
 #[test]
-fn gnu_shared() {
-    let test = Test::gnu();
-    test.gcc()
-        .file("foo.c")
+fn trad_shared() {
+    let test = Test::trad();
+    test.target("x86_64-unknown-linux-gnu")
         .shared_flag(true)
         .static_flag(false)
+        .file("foo.c")
         .compile("foo");
-
     test.cmd(0).must_have("-shared").must_not_have("-static");
 }
 
 #[test]
-fn gnu_flag_if_supported() {
+fn trad_flag_if_supported() {
     if cfg!(windows) {
         return;
     }
-    let test = Test::gnu();
-    test.gcc()
+    let test = Test::trad();
+    test.target("x86_64-unknown-linux-gnu")
         .file("foo.c")
         .flag("-v")
         .flag_if_supported("-Wall")
         .flag_if_supported("-Wflag-does-not-exist")
         .flag_if_supported("-std=c++11")
         .compile("foo");
-
     test.cmd(0)
         .must_have("-v")
         .must_have("-Wall")
@@ -283,8 +282,8 @@ fn gnu_flag_if_supported_cpp() {
     if cfg!(windows) {
         return;
     }
-    let test = Test::gnu();
-    test.gcc()
+    let test = Test::trad();
+    test.target("x86_64-unknown-linux-gnu")
         .cpp(true)
         .file("foo.cpp")
         .flag_if_supported("-std=c++11")
@@ -295,8 +294,8 @@ fn gnu_flag_if_supported_cpp() {
 
 #[test]
 fn gnu_static() {
-    let test = Test::gnu();
-    test.gcc()
+    let test = Test::trad();
+    test.target("x86_64-unknown-linux-gnu")
         .file("foo.c")
         .shared_flag(false)
         .static_flag(true)
@@ -316,7 +315,7 @@ fn msvc_smoke() {
         .must_not_have("/Z7")
         .must_have("/c")
         .must_have("/MD");
-    test.cmd(1).must_have(test.td.path().join("foo.o"));
+    test.cmd(1).must_have(test.dir().join("foo.o"));
 }
 
 #[test]

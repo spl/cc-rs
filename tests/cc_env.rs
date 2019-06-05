@@ -21,7 +21,7 @@ fn main() {
 }
 
 fn ccache() {
-    let test = Test::gnu();
+    let test = Test::trad();
 
     env::set_var("CC", "ccache cc");
     let compiler = test.gcc().file("foo.c").get_compiler();
@@ -30,8 +30,8 @@ fn ccache() {
 }
 
 fn ccache_spaces() {
-    let test = Test::gnu();
-    test.shim("ccache");
+    let test = Test::trad();
+    test.stub("ccache");
 
     env::set_var("CC", "ccache        cc");
     let compiler = test.gcc().file("foo.c").get_compiler();
@@ -39,8 +39,8 @@ fn ccache_spaces() {
 }
 
 fn distcc() {
-    let test = Test::gnu();
-    test.shim("distcc");
+    let test = Test::trad();
+    test.stub("distcc");
 
     env::set_var("CC", "distcc cc");
     let compiler = test.gcc().file("foo.c").get_compiler();
@@ -48,8 +48,8 @@ fn distcc() {
 }
 
 fn ccache_env_flags() {
-    let test = Test::gnu();
-    test.shim("ccache");
+    let test = Test::trad();
+    test.stub("ccache");
 
     env::set_var("CC", "ccache lol-this-is-not-a-compiler");
     let compiler = test.gcc().file("foo.c").get_compiler();
@@ -79,8 +79,8 @@ fn ccache_env_flags() {
 }
 
 fn leading_spaces() {
-    let test = Test::gnu();
-    test.shim("ccache");
+    let test = Test::trad();
+    test.stub("ccache");
 
     env::set_var("CC", " test ");
     let compiler = test.gcc().file("foo.c").get_compiler();
@@ -90,8 +90,8 @@ fn leading_spaces() {
 }
 
 fn extra_flags() {
-    let test = Test::gnu();
-    test.shim("ccache");
+    let test = Test::trad();
+    test.stub("ccache");
 
     env::set_var("CC", "ccache cc -m32");
     let compiler = test.gcc().file("foo.c").get_compiler();
@@ -99,8 +99,8 @@ fn extra_flags() {
 }
 
 fn path_to_ccache() {
-    let test = Test::gnu();
-    test.shim("ccache");
+    let test = Test::trad();
+    test.stub("ccache");
 
     env::set_var("CC", "/path/to/ccache.exe cc -m32");
     let compiler = test.gcc().file("foo.c").get_compiler();
@@ -112,8 +112,8 @@ fn path_to_ccache() {
 }
 
 fn more_spaces() {
-    let test = Test::gnu();
-    test.shim("ccache");
+    let test = Test::trad();
+    test.stub("ccache");
 
     env::set_var("CC", "cc -m32");
     let compiler = test.gcc().file("foo.c").get_compiler();
