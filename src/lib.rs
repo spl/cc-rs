@@ -1096,9 +1096,6 @@ impl Build {
     ///
     /// This will return a result instead of panicing; see get_compiler() for the complete description.
     pub fn try_get_compiler(&self) -> Result<Tool, Error> {
-        let opt_level = self.get_opt_level()?;
-        let target = self.get_target()?;
-
         let mut cmd = self.get_base_compiler()?;
         let envflags = self.envflags(if self.cpp { "CXXFLAGS" } else { "CFLAGS" });
 
@@ -1107,7 +1104,7 @@ impl Build {
         let use_defaults = self.getenv("CRATE_CC_NO_DEFAULTS").is_none();
 
         if use_defaults {
-            self.add_default_flags(&mut cmd, &target, &opt_level)?;
+            self.add_default_flags(&mut cmd)?;
         } else {
             println!("Info: default compiler flags are disabled");
         }
@@ -1174,12 +1171,11 @@ impl Build {
         Ok(cmd)
     }
 
-    fn add_default_flags(
-        &self,
-        cmd: &mut Tool,
-        target: &str,
-        opt_level: &str,
-    ) -> Result<(), Error> {
+    fn add_default_flags(&self, cmd: &mut Tool) -> Result<(), Error> {
+        let host = self.get_host()?;
+        let target = self.get_target()?;
+        let opt_level = self.get_opt_level()?;
+
         // Non-target flags
         // If the flag is not conditioned on target variable, it belongs here :)
         match cmd.family {
@@ -1249,6 +1245,22 @@ impl Build {
         // Target flags
         match cmd.family {
             ToolFamily::Clang => {
+                let mut target = target.clone();
+
+                if host.ends_with("-darwin") {
+                    let darwin_version = self
+                        .cmd("uname")
+                        .arg("-r")
+                        .stderr(Stdio::inherit())
+                        .output()?
+                        .stdout;
+                    for darwin_version in std::str::from_utf8(&darwin_version) {
+                        target.push_str(darwin_version);
+                    }
+                }
+
+                println!("target: {}", target);
+
                 cmd.args.push(format!("--target={}", target).into());
             }
             ToolFamily::Msvc { clang_cl } => {
