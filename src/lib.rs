@@ -292,6 +292,7 @@ impl ToolFamily {
                 println!("running: {:?}", cmd);
                 cmd.output()?
             };
+            println!("====== output: {:?}", output);
 
             // Check if the compiler failed.
             if !output.status.success() {
@@ -305,6 +306,7 @@ impl ToolFamily {
 
             // Parse each line of the compiler output.
             for line in output.lines() {
+                println!("====== line: {}", line);
                 // If we get a successful parse, we stop everything and return the result.
                 for tool_family in line.parse() {
                     return Ok(tool_family);
