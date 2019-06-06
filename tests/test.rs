@@ -7,6 +7,11 @@ use support::Test;
 mod support;
 
 #[test]
+fn tool_family() {
+    println!("====== ToolFamily: {:?}", cc::ToolFamily::try_new("cc").unwrap());
+}
+
+#[test]
 fn gnu_smoke() {
     let test = Test::gnu();
     test.gcc().file("foo.c").compile("foo");

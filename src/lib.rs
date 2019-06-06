@@ -60,12 +60,14 @@
 
 #[cfg(feature = "parallel")]
 extern crate rayon;
+extern crate tempfile;
 
 use std::collections::HashMap;
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fmt::{self, Display};
 use std::fs;
+use std::str;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -194,17 +196,127 @@ pub struct Tool {
 ///
 /// Detection of a family is done on best-effort basis and may not accurately reflect the tool.
 #[derive(Copy, Clone, Debug, PartialEq)]
-enum ToolFamily {
+pub enum ToolFamily {
     /// Tool is GNU Compiler Collection-like.
     Gnu,
     /// Tool is Clang-like. It differs from the GCC in a sense that it accepts superset of flags
     /// and its cross-compilation approach is different.
     Clang,
     /// Tool is the MSVC cl.exe.
-    Msvc { clang_cl: bool },
+    Msvc {
+        /// blah
+        clang_cl: bool },
 }
 
+/*
 impl ToolFamily {
+    const GNU: &'static str = "gnu";
+    const CLANG: &'static str = "clang";
+    const MSVC_CLANG: &'static str = "msvc_clang";
+    const MSVC: &'static str = "msvc";
+}
+*/
+
+impl std::str::FromStr for ToolFamily {
+    type Err = ParseToolFamilyError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        use ToolFamily::*;
+        match s {
+            "gnu" => Ok(Gnu),
+            "clang" => Ok(Clang),
+            "msvc_clang" => Ok(Msvc { clang_cl: true }),
+            "msvc" => Ok(Msvc { clang_cl: false }),
+            _ => Err(ParseToolFamilyError(())),
+        }
+    }
+}
+
+/// An error returned when parsing a string into a [`ToolFamily`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParseToolFamilyError(());
+
+impl fmt::Display for ParseToolFamilyError {
+    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt.write_str("unrecognized tool family")
+    }
+}
+
+/*
+#[cfg(test)]
+mod tests {
+
+    #[test]
+    fn tool_family() {
+        println!("ToolFamily: {:?}", super::ToolFamily::try_new("cc").unwrap());
+    }
+}
+*/
+
+impl ToolFamily {
+
+    /*
+    fn new<S: AsRef<OsStr>>(program: S) -> ToolFamily {
+        ToolFamily::from_expand(program).unwrap_or(ToolFamily::Gnu)
+    }
+    */
+
+    /// blah
+    #[allow(dead_code)]
+    pub fn try_new<S: AsRef<OsStr>>(program: S) -> Result<ToolFamily, Error> {
+        // Create a temporary file containing C preprocessor macros.
+        let mut input = tempfile::Builder::new()
+            .prefix("tool_family_")
+            .suffix(".c")
+            .tempfile()?;
+        input.write_all(b"\
+            #if defined(_MSC_VER) && defined(__clang__)\n\
+            msvc_clang\n\
+            #elif defined(_MSC_VER)\n\
+            msvc\n\
+            #elif defined(__clang__)\n\
+            clang\n\
+            #elif defined(__GNUC__)\n\
+            gnu\n\
+            #else\n\
+            unknown\n\
+            #endif\n")?;
+        input.flush()?;
+
+        // Try each of the known flags for expanding preprocessor input.
+        for flag in &["-E", "/E"] {
+
+            // Feed the above flag and input file path into the compiler.
+            let output = {
+                let mut cmd = Command::new(&program);
+                cmd.arg(flag).arg(input.path().to_str().unwrap());
+                println!("running: {:?}", cmd);
+                cmd.output()?
+            };
+
+            // Check if the compiler failed.
+            if !output.status.success() {
+                // If it did, we assume it was due to bad arguments. Let's try the next flag.
+                continue;
+            }
+
+            // Check that the output is UTF-8. This should only fail if the compiler produces
+            // invalid output. Given that we have ASCII input above, it shouldn't happen.
+            let output = str::from_utf8(&output.stdout).unwrap();
+
+            // Parse each line of the compiler output.
+            for line in output.lines() {
+                // If we get a successful parse, we stop everything and return the result.
+                for tool_family in line.parse() {
+                    return Ok(tool_family);
+                }
+            }
+        }
+
+        // Finally, we assume that any unknown compiler is a member of the Gnu family.
+        // FIXME: We should have a better fallback than this.
+        Ok(ToolFamily::Gnu)
+    }
+
     /// What the flag to request debug info for this family of tools look like
     fn add_debug_flags(&self, cmd: &mut Tool) {
         match *self {
