@@ -15,7 +15,13 @@ fn tool_family() {
 #[test]
 #[cfg(windows)]
 fn tool_family() {
-    println!("====== ToolFamily: {:?}", cc::ToolFamily::try_new("cl.exe").unwrap());
+    let path = env::var_os("PATH")
+        .and_then(|path| {
+            env::split_paths(&path)
+                .map(|p| p.join("cl.exe"))
+                .find(|p| p.exists())
+        }).unwrap();
+    println!("====== ToolFamily: {:?}", cc::ToolFamily::try_new(path).unwrap());
 }
 
 #[test]
