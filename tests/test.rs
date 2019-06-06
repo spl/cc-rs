@@ -14,14 +14,9 @@ fn tool_family() {
 
 #[test]
 #[cfg(windows)]
-fn tool_family() {
-    let path = env::var_os("PATH")
-        .and_then(|path| {
-            env::split_paths(&path)
-                .map(|p| p.join("cl.exe"))
-                .find(|p| p.exists())
-        }).unwrap();
-    println!("====== ToolFamily: {:?}", cc::ToolFamily::try_new(path).unwrap());
+fn tool_family2() {
+    let tool = cc::windows_registry::find_tool("x86_64-pc-windows-msvc", "cl.exe");
+    println!("====== ToolFamily: {:?}", cc::ToolFamily::try_new(tool.unwrap().path()).unwrap());
 }
 
 #[test]
