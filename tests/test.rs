@@ -7,8 +7,15 @@ use support::Test;
 mod support;
 
 #[test]
+#[cfg(unix)]
 fn tool_family() {
     println!("====== ToolFamily: {:?}", cc::ToolFamily::try_new("cc").unwrap());
+}
+
+#[test]
+#[cfg(windows)]
+fn tool_family() {
+    println!("====== ToolFamily: {:?}", cc::ToolFamily::try_new("cl.exe").unwrap());
 }
 
 #[test]
