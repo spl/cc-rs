@@ -280,7 +280,10 @@ impl ToolFamily {
             #else\n\
             unknown\n\
             #endif\n")?;
-        input.flush()?;
+
+        // Close `input` but keep the path. We need to do this so that another Windows process can
+        // open the file. When `input` is dropped, the temporary file will be deleted.
+        let input = input.into_temp_path();
 
         // Try each of the known flags for expanding preprocessor input.
         for flag in &["-E", "/E"] {
@@ -288,7 +291,7 @@ impl ToolFamily {
             // Feed the above flag and input file path into the compiler.
             let output = {
                 let mut cmd = Command::new(&program);
-                cmd.arg(flag).arg(input.path().to_str().unwrap());
+                cmd.arg(flag).arg(input.to_str().unwrap());
                 println!("running: {:?}", cmd);
                 cmd.output()?
             };
