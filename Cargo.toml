@@ -19,6 +19,7 @@ exclude = ["/.travis.yml", "/appveyor.yml"]
 [dependencies]
 rayon = { version = "1.0", optional = true }
 tempfile = "3.0"
+which = "2.0"
 
 [features]
 parallel = ["rayon"]

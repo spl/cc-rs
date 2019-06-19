@@ -61,6 +61,7 @@
 #[cfg(feature = "parallel")]
 extern crate rayon;
 extern crate tempfile;
+extern crate which;
 
 use std::collections::HashMap;
 use std::env;
@@ -73,6 +74,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
+
+mod tool;
+
+use tool::Minimal;
 
 // These modules are all glue to support reading the MSVC version from
 // the registry and from COM interfaces
@@ -180,6 +185,7 @@ impl Display for Error {
 /// compiler itself.
 #[derive(Clone, Debug)]
 pub struct Tool {
+    minimal: Minimal,
     path: PathBuf,
     cc_wrapper_path: Option<PathBuf>,
     cc_wrapper_args: Vec<OsString>,
@@ -208,15 +214,6 @@ pub enum ToolFamily {
         clang_cl: bool },
 }
 
-/*
-impl ToolFamily {
-    const GNU: &'static str = "gnu";
-    const CLANG: &'static str = "clang";
-    const MSVC_CLANG: &'static str = "msvc_clang";
-    const MSVC: &'static str = "msvc";
-}
-*/
-
 impl std::str::FromStr for ToolFamily {
     type Err = ParseToolFamilyError;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -241,28 +238,10 @@ impl fmt::Display for ParseToolFamilyError {
     }
 }
 
-/*
-#[cfg(test)]
-mod tests {
-
-    #[test]
-    fn tool_family() {
-        println!("ToolFamily: {:?}", super::ToolFamily::try_new("cc").unwrap());
-    }
-}
-*/
-
 impl ToolFamily {
 
-    /*
-    fn new<S: AsRef<OsStr>>(program: S) -> ToolFamily {
-        ToolFamily::from_expand(program).unwrap_or(ToolFamily::Gnu)
-    }
-    */
-
     /// blah
-    #[allow(dead_code)]
-    pub fn try_new<S: AsRef<OsStr>>(program: S) -> Result<ToolFamily, Error> {
+    pub fn of_command(cmd: &mut Command) -> Result<ToolFamily, io::Error> {
         // Create a temporary file containing C preprocessor macros.
         let mut input = tempfile::Builder::new()
             .prefix("tool_family_")
@@ -290,7 +269,6 @@ impl ToolFamily {
 
             // Feed the above flag and input file path into the compiler.
             let output = {
-                let mut cmd = Command::new(&program);
                 cmd.arg(flag).arg(input.to_str().unwrap());
                 println!("running: {:?}", cmd);
                 cmd.output()?
@@ -1796,7 +1774,7 @@ impl Build {
 
     fn get_base_compiler(&self) -> Result<Tool, Error> {
         if let Some(ref c) = self.compiler {
-            return Ok(Tool::new(c.clone()));
+            return Ok(Tool::new(Minimal::from_exe("User-defined compiler".to_string(), c.clone())?, false));
         }
         let host = self.get_host()?;
         let target = self.get_target()?;
@@ -1822,7 +1800,7 @@ impl Build {
                 // semi-buggy build scripts which are shared in
                 // makefiles/configure scripts (where spaces are far more
                 // lenient)
-                let mut t = Tool::new(PathBuf::from(tool.trim()));
+                let mut t = Tool::new(tool, false);
                 if let Some(cc) = cc {
                     t.cc_wrapper_path = Some(PathBuf::from(cc));
                 }
@@ -1833,16 +1811,7 @@ impl Build {
             })
             .or_else(|| {
                 if target.contains("emscripten") {
-                    let tool = if self.cpp { "em++" } else { "emcc" };
-                    // Windows uses bat file so we have to be a bit more specific
-                    if cfg!(windows) {
-                        let mut t = Tool::new(PathBuf::from("cmd"));
-                        t.args.push("/c".into());
-                        t.args.push(format!("{}.bat", tool).into());
-                        Some(t)
-                    } else {
-                        Some(Tool::new(PathBuf::from(tool)))
-                    }
+                    Some(Tool::new(Minimal::emscripten(self.cpp).expect("emscripten command failed"), false))
                 } else {
                     None
                 }
@@ -1953,7 +1922,7 @@ impl Build {
                 } else {
                     default.to_string()
                 };
-                Tool::new(PathBuf::from(compiler))
+                Tool::new(Minimal::from_exe("Compiler determined by target".to_string(), compiler)?, false)
             }
         };
 
@@ -1963,10 +1932,10 @@ impl Build {
                 "CUDA compilation currently assumes empty pre-existing args"
             );
             let nvcc = match self.get_var("NVCC") {
-                Err(_) => "nvcc".into(),
-                Ok(nvcc) => nvcc,
+                Err(_) => Minimal::from_exe("Nvidia CUDA Compiler".to_string(), "nvcc")?,
+                Ok(nvcc) => Minimal::from_exe("$NVCC".to_string(), &nvcc)?
             };
-            let mut nvcc_tool = Tool::with_features(PathBuf::from(nvcc), self.cuda);
+            let mut nvcc_tool = Tool::new(nvcc, self.cuda);
             nvcc_tool
                 .args
                 .push(format!("-ccbin={}", tool.path.display()).into());
@@ -2029,16 +1998,18 @@ impl Build {
     }
 
     /// Returns compiler path, optional modifier name from whitelist, and arguments vec
-    fn env_tool(&self, name: &str) -> Option<(String, Option<String>, Vec<String>)> {
+    fn env_tool(&self, name: &str) -> Option<(Minimal, Option<String>, Vec<String>)> {
         let tool = match self.get_var(name) {
             Ok(tool) => tool,
             Err(_) => return None,
         };
 
+        let tool = tool.trim();
+
         // If this is an exact path on the filesystem we don't want to do any
         // interpretation at all, just pass it on through. This'll hopefully get
         // us to support spaces-in-paths.
-        if Path::new(&tool).exists() {
+        if let Ok(tool) = Minimal::from_path(format!("${}", name), tool) {
             return Some((tool, None, Vec::new()));
         }
 
@@ -2077,19 +2048,21 @@ impl Build {
             .unwrap();
         if known_wrappers.contains(&file_stem) {
             if let Some(compiler) = parts.next() {
-                return Some((
-                    compiler.to_string(),
-                    Some(maybe_wrapper.to_string()),
-                    parts.map(|s| s.to_string()).collect(),
-                ));
+                if let Ok(compiler) = Minimal::from_path(format!("${}", name), compiler) {
+                    return Some((
+                            compiler,
+                            Some(maybe_wrapper.to_string()),
+                            parts.map(|s| s.to_string()).collect(),
+                            ));
+                }
             }
         }
 
-        Some((
-            maybe_wrapper.to_string(),
-            None,
-            parts.map(|s| s.to_string()).collect(),
-        ))
+        if let Ok(tool) = Minimal::from_path(format!("${}", name), maybe_wrapper) {
+            return Some((tool, None, parts.map(|s| s.to_string()).collect()));
+        }
+
+        None
     }
 
     /// Returns the default C++ standard library for the current target: `libc++`
@@ -2228,37 +2201,18 @@ impl Default for Build {
 }
 
 impl Tool {
-    fn new(path: PathBuf) -> Tool {
-        Tool::with_features(path, false)
-    }
-
-    fn with_features(path: PathBuf, cuda: bool) -> Tool {
-        // Try to detect family of the tool from its name, falling back to Gnu.
-        let family = if let Some(fname) = path.file_name().and_then(|p| p.to_str()) {
-            if fname.contains("clang-cl") {
-                ToolFamily::Msvc { clang_cl: true }
-            } else if fname.contains("cl")
-                && !fname.contains("cloudabi")
-                && !fname.contains("uclibc")
-                && !fname.contains("clang")
-            {
-                ToolFamily::Msvc { clang_cl: false }
-            } else if fname.contains("clang") {
-                ToolFamily::Clang
-            } else {
-                ToolFamily::Gnu
-            }
-        } else {
-            ToolFamily::Gnu
-        };
+    fn new(minimal: Minimal, cuda: bool) -> Tool {
+        let path = minimal.path().to_path_buf();
+        let family = minimal.family();
         Tool {
-            path: path,
+            minimal,
+            path,
             cc_wrapper_path: None,
             cc_wrapper_args: Vec::new(),
             args: Vec::new(),
             env: Vec::new(),
-            family: family,
-            cuda: cuda,
+            family,
+            cuda,
             removed_args: Vec::new(),
         }
     }
