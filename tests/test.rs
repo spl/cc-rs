@@ -6,18 +6,22 @@ use support::Test;
 
 mod support;
 
+/*
 #[test]
 #[cfg(unix)]
 fn tool_family() {
     println!("====== ToolFamily: {:?}", cc::ToolFamily::try_new("cc").unwrap());
 }
+*/
 
+/*
 #[test]
 #[cfg(windows)]
 fn tool_family2() {
     let tool = cc::windows_registry::find_tool("x86_64-pc-windows-msvc", "cl.exe");
     println!("====== ToolFamily: {:?}", cc::ToolFamily::try_new(tool.unwrap().path()).unwrap());
 }
+*/
 
 #[test]
 fn gnu_smoke() {
