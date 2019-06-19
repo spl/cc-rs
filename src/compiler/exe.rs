@@ -46,15 +46,15 @@ impl Exe {
     /// Create an `Exe` from a path and arguments.
     ///
     /// The canonical path and `ToolFamily` are determined automatically.
-    fn from_path_with_args<P: AsRef<Path>>(
-        name: String,
-        path: P,
-        args: Vec<String>,
-    ) -> io::Result<Self> {
+    fn from_path_with_args<S, P>(name: S, path: P, args: Vec<String>) -> io::Result<Self>
+    where
+        S: Into<String>,
+        P: AsRef<Path>,
+    {
         let path = path.as_ref().canonicalize()?;
         let family = ToolFamily::of_command(Command::new(&path).args(&args))?;
         Ok(Exe {
-            name,
+            name: name.into(),
             path,
             args,
             family,
@@ -64,7 +64,11 @@ impl Exe {
     /// Create an `Exe` from a path.
     ///
     /// The canonical path and `ToolFamily` are determined automatically.
-    pub fn from_path<P: AsRef<Path>>(name: String, path: P) -> io::Result<Self> {
+    pub fn from_path<S, P>(name: S, path: P) -> io::Result<Self>
+    where
+        S: Into<String>,
+        P: AsRef<Path>,
+    {
         Exe::from_path_with_args(name, path, Vec::new())
     }
 
@@ -73,11 +77,11 @@ impl Exe {
     /// The executable must be found in one of the directories in the `PATH` environment.
     ///
     /// The canonical path of the executable and the `ToolFamily` are determined automatically.
-    fn from_name_with_args<E: AsRef<OsStr>>(
-        name: String,
-        exe: E,
-        args: Vec<String>,
-    ) -> io::Result<Self> {
+    fn from_name_with_args<S, E>(name: S, exe: E, args: Vec<String>) -> io::Result<Self>
+    where
+        S: Into<String>,
+        E: AsRef<OsStr>,
+    {
         Exe::from_path_with_args(name, &which(exe).unwrap(), args)
     }
 
@@ -86,7 +90,11 @@ impl Exe {
     /// The executable must be found in one of the directories in the `PATH` environment.
     ///
     /// The canonical path of the executable and the `ToolFamily` are determined automatically.
-    pub fn from_name<E: AsRef<OsStr>>(name: String, exe: E) -> io::Result<Self> {
+    pub fn from_name<S, E>(name: S, exe: E) -> io::Result<Self>
+    where
+        S: Into<String>,
+        E: AsRef<OsStr>,
+    {
         Exe::from_name_with_args(name, exe, Vec::new())
     }
 

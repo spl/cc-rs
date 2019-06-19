@@ -1774,7 +1774,7 @@ impl Build {
 
     fn get_base_compiler(&self) -> Result<Tool, Error> {
         if let Some(ref c) = self.compiler {
-            return Ok(Tool::new(Exe::from_name("User-defined compiler".to_string(), c.clone())?, false));
+            return Ok(Tool::new(Exe::from_name("User-defined compiler", c.clone())?, false));
         }
         let host = self.get_host()?;
         let target = self.get_target()?;
@@ -1922,7 +1922,7 @@ impl Build {
                 } else {
                     default.to_string()
                 };
-                Tool::new(Exe::from_name("Compiler determined by target".to_string(), compiler)?, false)
+                Tool::new(Exe::from_name("Compiler determined by target", compiler)?, false)
             }
         };
 
@@ -1932,8 +1932,8 @@ impl Build {
                 "CUDA compilation currently assumes empty pre-existing args"
             );
             let nvcc = match self.get_var("NVCC") {
-                Err(_) => Exe::from_name("Nvidia CUDA Compiler".to_string(), "nvcc")?,
-                Ok(nvcc) => Exe::from_name("$NVCC".to_string(), &nvcc)?
+                Err(_) => Exe::from_name("Nvidia CUDA Compiler", "nvcc")?,
+                Ok(nvcc) => Exe::from_name("$NVCC", &nvcc)?
             };
             let mut nvcc_tool = Tool::new(nvcc, self.cuda);
             nvcc_tool
