@@ -12,7 +12,7 @@ use which::which;
 /// This may represent the invocation of a script, so it includes both the path of an executable
 /// and arguments passed to the executable.
 #[derive(Clone, Debug)]
-pub struct Minimal {
+pub struct Exe {
     /// Familiar name for the compiler. This is used for printing messages.
     name: String,
     /// Path of the executable. If this involves invoking a script, the executable may be something
@@ -24,35 +24,35 @@ pub struct Minimal {
     family: ToolFamily,
 }
 
-impl fmt::Display for Minimal {
+impl fmt::Display for Exe {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
         write!(fmt, "{} ({:?})", self.name, self.to_command())
     }
 }
 
-impl Minimal {
+impl Exe {
 
     fn new<P: AsRef<Path>>(name: String, path: P, args: Vec<String>, family: ToolFamily) -> Result<Self, io::Error> {
         let path = path.as_ref().canonicalize()?;
-        Ok(Minimal { name, path, args, family })
+        Ok(Exe { name, path, args, family })
     }
 
     fn from_path_with_args<P: AsRef<Path>>(name: String, path: P, args: Vec<String>) -> Result<Self, io::Error> {
         let family = ToolFamily::of_command(Command::new(path.as_ref()).args(&args))?;
-        Minimal::new(name, path, args, family)
+        Exe::new(name, path, args, family)
     }
 
     pub fn from_path<P: AsRef<Path>>(name: String, path: P) -> Result<Self, io::Error> {
-        Minimal::from_path_with_args(name, path, Vec::new())
+        Exe::from_path_with_args(name, path, Vec::new())
     }
 
-    fn from_exe_with_args<E: AsRef<OsStr>>(name: String, exe: E, args: Vec<String>) -> Result<Self, io::Error> {
+    fn from_name_with_args<E: AsRef<OsStr>>(name: String, exe: E, args: Vec<String>) -> Result<Self, io::Error> {
         let path = which(exe).unwrap();
-        Minimal::from_path_with_args(name, &path, args)
+        Exe::from_path_with_args(name, &path, args)
     }
 
-    pub fn from_exe<E: AsRef<OsStr>>(name: String, exe: E) -> Result<Self, io::Error> {
-        Minimal::from_exe_with_args(name, exe, Vec::new())
+    pub fn from_name<E: AsRef<OsStr>>(name: String, exe: E) -> Result<Self, io::Error> {
+        Exe::from_name_with_args(name, exe, Vec::new())
     }
 
     fn to_command(&self) -> Command {
@@ -74,9 +74,9 @@ impl Minimal {
 
         if cfg!(windows) {
             // Emscripten on Windows uses a batch file.
-            Minimal::from_exe_with_args(name, "cmd", vec!["/c".to_string(), format!("{}.bat", exe)])
+            Exe::from_name_with_args(name, "cmd", vec!["/c".to_string(), format!("{}.bat", exe)])
         } else {
-            Minimal::from_exe(name, exe)
+            Exe::from_name(name, exe)
         }
     }
 }

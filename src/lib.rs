@@ -75,9 +75,9 @@ use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
-mod tool;
+mod compiler;
 
-use tool::Minimal;
+use compiler::Exe;
 
 // These modules are all glue to support reading the MSVC version from
 // the registry and from COM interfaces
@@ -185,7 +185,7 @@ impl Display for Error {
 /// compiler itself.
 #[derive(Clone, Debug)]
 pub struct Tool {
-    minimal: Minimal,
+    exe: Exe,
     path: PathBuf,
     cc_wrapper_path: Option<PathBuf>,
     cc_wrapper_args: Vec<OsString>,
@@ -1774,7 +1774,7 @@ impl Build {
 
     fn get_base_compiler(&self) -> Result<Tool, Error> {
         if let Some(ref c) = self.compiler {
-            return Ok(Tool::new(Minimal::from_exe("User-defined compiler".to_string(), c.clone())?, false));
+            return Ok(Tool::new(Exe::from_name("User-defined compiler".to_string(), c.clone())?, false));
         }
         let host = self.get_host()?;
         let target = self.get_target()?;
@@ -1811,7 +1811,7 @@ impl Build {
             })
             .or_else(|| {
                 if target.contains("emscripten") {
-                    Some(Tool::new(Minimal::emscripten(self.cpp).expect("emscripten command failed"), false))
+                    Some(Tool::new(Exe::emscripten(self.cpp).expect("emscripten command failed"), false))
                 } else {
                     None
                 }
@@ -1922,7 +1922,7 @@ impl Build {
                 } else {
                     default.to_string()
                 };
-                Tool::new(Minimal::from_exe("Compiler determined by target".to_string(), compiler)?, false)
+                Tool::new(Exe::from_name("Compiler determined by target".to_string(), compiler)?, false)
             }
         };
 
@@ -1932,8 +1932,8 @@ impl Build {
                 "CUDA compilation currently assumes empty pre-existing args"
             );
             let nvcc = match self.get_var("NVCC") {
-                Err(_) => Minimal::from_exe("Nvidia CUDA Compiler".to_string(), "nvcc")?,
-                Ok(nvcc) => Minimal::from_exe("$NVCC".to_string(), &nvcc)?
+                Err(_) => Exe::from_name("Nvidia CUDA Compiler".to_string(), "nvcc")?,
+                Ok(nvcc) => Exe::from_name("$NVCC".to_string(), &nvcc)?
             };
             let mut nvcc_tool = Tool::new(nvcc, self.cuda);
             nvcc_tool
@@ -1998,7 +1998,7 @@ impl Build {
     }
 
     /// Returns compiler path, optional modifier name from whitelist, and arguments vec
-    fn env_tool(&self, name: &str) -> Option<(Minimal, Option<String>, Vec<String>)> {
+    fn env_tool(&self, name: &str) -> Option<(Exe, Option<String>, Vec<String>)> {
         let tool = match self.get_var(name) {
             Ok(tool) => tool,
             Err(_) => return None,
@@ -2009,7 +2009,7 @@ impl Build {
         // If this is an exact path on the filesystem we don't want to do any
         // interpretation at all, just pass it on through. This'll hopefully get
         // us to support spaces-in-paths.
-        if let Ok(tool) = Minimal::from_path(format!("${}", name), tool) {
+        if let Ok(tool) = Exe::from_path(format!("${}", name), tool) {
             return Some((tool, None, Vec::new()));
         }
 
@@ -2048,7 +2048,7 @@ impl Build {
             .unwrap();
         if known_wrappers.contains(&file_stem) {
             if let Some(compiler) = parts.next() {
-                if let Ok(compiler) = Minimal::from_path(format!("${}", name), compiler) {
+                if let Ok(compiler) = Exe::from_path(format!("${}", name), compiler) {
                     return Some((
                             compiler,
                             Some(maybe_wrapper.to_string()),
@@ -2058,7 +2058,7 @@ impl Build {
             }
         }
 
-        if let Ok(tool) = Minimal::from_path(format!("${}", name), maybe_wrapper) {
+        if let Ok(tool) = Exe::from_path(format!("${}", name), maybe_wrapper) {
             return Some((tool, None, parts.map(|s| s.to_string()).collect()));
         }
 
@@ -2201,11 +2201,11 @@ impl Default for Build {
 }
 
 impl Tool {
-    fn new(minimal: Minimal, cuda: bool) -> Tool {
-        let path = minimal.path().to_path_buf();
-        let family = minimal.family();
+    fn new(exe: Exe, cuda: bool) -> Tool {
+        let path = exe.path().to_path_buf();
+        let family = exe.family();
         Tool {
-            minimal,
+            exe,
             path,
             cc_wrapper_path: None,
             cc_wrapper_args: Vec::new(),
