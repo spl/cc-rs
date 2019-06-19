@@ -1,76 +1,102 @@
-use std::fmt;
 use super::super::ToolFamily;
-use std::process::Command;
-use std::path::{Path, PathBuf};
-use std::io;
 use std::ffi::OsStr;
+use std::fmt;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use which::which;
 
-/// A minimal representation of the components necessary to invoke a compiler without any wrapper
-/// or additional flags that modify its behavior.
+/// A representation of the minumum components needed to execute a compiler.
 ///
-/// This may represent the invocation of a script, so it includes both the path of an executable
-/// and arguments passed to the executable.
-#[derive(Clone, Debug)]
+/// In many cases, this representation contains only a path to the executable, thus the name `Exe`.
+/// It does not contain flags that modify the behavior of the executable. However, in some cases,
+/// an `Exe` may represent the invocation of a script with arguments.
+#[derive(Clone)]
 pub struct Exe {
-    /// Familiar name for the compiler. This is used for printing messages.
+    /// Familiar name for the compiler.
+    ///
+    /// This is used for printing messages.
     name: String,
-    /// Path of the executable. If this involves invoking a script, the executable may be something
-    /// like `sh` or `cmd.exe`.
+
+    /// Path of an executable.
+    ///
+    /// This may be the actual compiler or something like `sh` or `cmd.exe` if this involves
+    /// invoking a script.
+    ///
+    /// Invariant: This path must be exist, and it should be the canonical path. A canonical path
+    /// helps with identifying problems related to the executable called.
     path: PathBuf,
+
     /// Arguments passed to the executable.
     args: Vec<String>,
+
     /// Family of tools to which this compiler belongs.
+    ///
+    /// Invariant: This should be determined from the compiler itself.
     family: ToolFamily,
 }
 
-impl fmt::Display for Exe {
-    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
-        write!(fmt, "{} ({:?})", self.name, self.to_command())
+impl fmt::Debug for Exe {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{} ({:?})", self.name, self.to_command())
     }
 }
 
 impl Exe {
-
-    fn new<P: AsRef<Path>>(name: String, path: P, args: Vec<String>, family: ToolFamily) -> Result<Self, io::Error> {
+    /// Create an `Exe` from a path and arguments.
+    ///
+    /// The canonical path and `ToolFamily` are determined automatically.
+    fn from_path_with_args<P: AsRef<Path>>(
+        name: String,
+        path: P,
+        args: Vec<String>,
+    ) -> io::Result<Self> {
         let path = path.as_ref().canonicalize()?;
-        Ok(Exe { name, path, args, family })
+        let family = ToolFamily::of_command(Command::new(&path).args(&args))?;
+        Ok(Exe {
+            name,
+            path,
+            args,
+            family,
+        })
     }
 
-    fn from_path_with_args<P: AsRef<Path>>(name: String, path: P, args: Vec<String>) -> Result<Self, io::Error> {
-        let family = ToolFamily::of_command(Command::new(path.as_ref()).args(&args))?;
-        Exe::new(name, path, args, family)
-    }
-
-    pub fn from_path<P: AsRef<Path>>(name: String, path: P) -> Result<Self, io::Error> {
+    /// Create an `Exe` from a path.
+    ///
+    /// The canonical path and `ToolFamily` are determined automatically.
+    pub fn from_path<P: AsRef<Path>>(name: String, path: P) -> io::Result<Self> {
         Exe::from_path_with_args(name, path, Vec::new())
     }
 
-    fn from_name_with_args<E: AsRef<OsStr>>(name: String, exe: E, args: Vec<String>) -> Result<Self, io::Error> {
-        let path = which(exe).unwrap();
-        Exe::from_path_with_args(name, &path, args)
+    /// Create an `Exe` from the name of executable and arguments.
+    ///
+    /// The executable must be found in one of the directories in the `PATH` environment.
+    ///
+    /// The canonical path of the executable and the `ToolFamily` are determined automatically.
+    fn from_name_with_args<E: AsRef<OsStr>>(
+        name: String,
+        exe: E,
+        args: Vec<String>,
+    ) -> io::Result<Self> {
+        Exe::from_path_with_args(name, &which(exe).unwrap(), args)
     }
 
-    pub fn from_name<E: AsRef<OsStr>>(name: String, exe: E) -> Result<Self, io::Error> {
+    /// Create an `Exe` from the name of executable.
+    ///
+    /// The executable must be found in one of the directories in the `PATH` environment.
+    ///
+    /// The canonical path of the executable and the `ToolFamily` are determined automatically.
+    pub fn from_name<E: AsRef<OsStr>>(name: String, exe: E) -> io::Result<Self> {
         Exe::from_name_with_args(name, exe, Vec::new())
     }
 
-    fn to_command(&self) -> Command {
-        let mut cmd = Command::new(&self.path);
-        cmd.args(&self.args);
-        cmd
-    }
-
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-
-    pub fn family(&self) -> ToolFamily {
-        self.family
-    }
-
-    pub fn emscripten(cpp: bool) -> Result<Self, io::Error> {
-        let (name, exe) = if cpp { ("Emscripten C++".to_string(), "em++") } else { ("Emscripten C".to_string(), "emcc") };
+    /// Create an `Exe` for Emscripten.
+    pub fn emscripten(cpp: bool) -> io::Result<Self> {
+        let (name, exe) = if cpp {
+            ("Emscripten C++".to_string(), "em++")
+        } else {
+            ("Emscripten C".to_string(), "emcc")
+        };
 
         if cfg!(windows) {
             // Emscripten on Windows uses a batch file.
@@ -78,5 +104,25 @@ impl Exe {
         } else {
             Exe::from_name(name, exe)
         }
+    }
+
+    /// Create a `Command` from an `Exe`.
+    fn to_command(&self) -> Command {
+        let mut cmd = Command::new(&self.path);
+        cmd.args(&self.args);
+        cmd
+    }
+
+    /// Returns the `Path` of the `Exe`.
+    ///
+    /// FIXME: We should not need this because the path may be something like `sh` or `cmd.exe` and
+    /// used to invoke a script.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Returns the `ToolFamily` of the `Exe`.
+    pub fn family(&self) -> ToolFamily {
+        self.family
     }
 }
