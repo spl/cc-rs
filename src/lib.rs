@@ -61,6 +61,8 @@
 #[cfg(feature = "parallel")]
 extern crate rayon;
 
+extern crate which;
+
 use std::collections::HashMap;
 use std::env;
 use std::ffi::{OsStr, OsString};
@@ -71,6 +73,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
+
+mod executable;
 
 // These modules are all glue to support reading the MSVC version from
 // the registry and from COM interfaces
