@@ -1691,6 +1691,10 @@ impl Build {
         let target = self.get_target()?;
 
         // Here begins the logic to find the `Tool`.
+        //
+        // The approach is to discharge the required conditions and `return` as soon as they are
+        // fulfilled. This allows us to keep the flow simple by avoiding `else` and reducing the
+        // number of conditions to consider as you read further.
 
         // First, the priority goes to the environment variable (`CC` or `CXX`).
         let tool: Option<Tool> = self
@@ -1722,6 +1726,7 @@ impl Build {
 
         // Windows
         if target.contains("windows") {
+            // MSVC
             if target.contains("msvc") {
                 assert!(!self.cuda, "MSVC with CUDA is not currently supported. Contributions welcome!");
 
@@ -1753,19 +1758,22 @@ impl Build {
                     }
                 };
                 return tool;
-            } else if target.contains("gnu") {
-                // MinGW
+            }
+
+
+            // MinGW
+            if target.contains("gnu") {
                 assert!(!self.cuda, "MinGW with CUDA is not currently supported. Contributions welcome!");
                 return Ok(Tool::new(Executable::new(gnu, "MinGW default")?, false));
-                
-            } else {
-                return Err(Error::new(ErrorKind::ArchitectureInvalid,
-                                      &format!("Unknown target: {}", target)));
+
             }
+
+            // Unknown Windows target
+            return Err(Error::new(ErrorKind::ArchitectureInvalid,
+                                  &format!("Unknown target: {}", target)));
         }
 
-        // We have now ruled out Windows as a target. From this point on, we can ignore
-        // Windows-related issues.
+        // We have now ruled out Windows as a target. From this point, we can ignore Windows.
 
         // This wrapper takes an `Executable` and builds a `Tool` from it. If we need CUDA, it
         // builds the appropriate `Tool` using the path of the `Executable` in an argument.
@@ -1795,8 +1803,8 @@ impl Build {
             }
         }
 
-        // From here on, we don't use the above `tool`. We're only looking for a default
-        // `Executable`.
+        // From here, we don't use the above `tool`. We only want a default `Executable`.
+        let tool = |exe| tool_from_exe(exe);
 
         // Android
         if target.contains("android") {
@@ -1811,18 +1819,23 @@ impl Build {
             return Executable::new(format!("{}-{}", target, gnu), note)
                 .or_else(|_| Executable::new(format!("{}-{}", target, clang), note))
                 .map_err(|e| e.into())
-                .and_then(|e| tool_from_exe(e));
+                .and_then(tool);
         }
 
         // CloudABI
         if target.contains("cloudabi") {
-            return tool_from_exe(Executable::new(format!("{}-{}", target, traditional), "CloudABI default")?);
+            return tool(Executable::new(format!("{}-{}", target, traditional), "CloudABI default")?);
         }
 
         // WASM/WASI
         if target == "wasm32-wasi" || target == "wasm32-unknown-wasi" || target == "wasm32-unknown-unknown" {
-            // FIXME: Should this be `clang` instead of `"clang"`? If not, comment here on why.
-            return tool_from_exe(Executable::new("clang", "WASM/WASI default")?);
+            // FIXME: Should this be `clang` instead of `"clang"`? If not, add comment why.
+            return tool(Executable::new("clang", "WASM/WASI default")?);
+        }
+
+        // VxWorks
+        if target.contains("vxworks") {
+            return tool(Executable::new("vx-cxx", "VxWorks C/C++ default")?);
         }
 
         // We're approaching the end!
@@ -1898,18 +1911,18 @@ impl Build {
                     _ => None,
                 });
             if let Some(prefix) = cross_compile {
-                return tool_from_exe(Executable::new(format!("{}-{}", prefix, gnu), "Cross-compiling default")?);
+                return tool(Executable::new(format!("{}-{}", prefix, gnu), "Cross-compiling default")?);
             }
         }
 
         // On Solaris, the `traditional` options (`cc`/`c++`) are unlikely to exist or be correct,
         // so we use `gnu` instead.
         if host.contains("solaris") {
-            return tool_from_exe(Executable::new(gnu, "Solaris default")?);
+            return tool(Executable::new(gnu, "Solaris default")?);
         }
 
         // This is the end.
-        return tool_from_exe(Executable::new(traditional, "Default")?);
+        return tool(Executable::new(traditional, "Default")?);
     }
 
     fn get_var(&self, var_base: &str) -> Result<String, Error> {
