@@ -1,7 +1,7 @@
+use super::{Error, ErrorKind::ToolNotFound};
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
-use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -85,17 +85,32 @@ impl Executable {
         note: S,
         args: Vec<String>,
         envs: HashMap<String, String>,
-    ) -> io::Result<Self> {
+    ) -> Result<Self, Error> {
         let name = name.into();
         let note = note.into();
 
         // Find the path of the executable. `name` can be an absolute path, a relative path, or an
         // executable found in one of the directories of the `PATH` environment variable.
-        let path = which::which(&name)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("{} ({:?})", e, name)))?;
+        let path = which::which(&name).map_err(|err| {
+            Error::new(
+                ToolNotFound,
+                &format!("Path for {:?} ({}) not found: {}", name, note, err),
+            )
+        })?;
 
         // Traverse symbolic links to find the canonical path.
-        let path = path.canonicalize()?.into();
+        let path = path
+            .canonicalize()
+            .map_err(|err| {
+                Error::new(
+                    ToolNotFound,
+                    &format!(
+                        "Canonical path for {:?} ({:?}, {}) not found: {}",
+                        name, path, note, err
+                    ),
+                )
+            })?
+            .into();
 
         // Build the `Executable` and test that it can be run.
         let exe = Executable {
@@ -111,12 +126,12 @@ impl Executable {
     }
 
     /// Create an `Executable` with no arguments or environment variables.
-    pub fn new<N: Into<OsString>, S: Into<String>>(name: N, note: S) -> io::Result<Self> {
+    pub fn new<N: Into<OsString>, S: Into<String>>(name: N, note: S) -> Result<Self, Error> {
         Executable::with_context(name, note, Vec::new(), HashMap::new())
     }
 
     /// Create an `Executable` for Emscripten.
-    pub fn emscripten_compiler(cpp: bool) -> io::Result<Self> {
+    pub fn emscripten_compiler(cpp: bool) -> Result<Self, Error> {
         let (name, exe) = if cpp {
             ("Emscripten C++", "em++")
         } else {

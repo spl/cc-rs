@@ -60,7 +60,7 @@
 
 #[cfg(feature = "parallel")]
 extern crate rayon;
-
+extern crate tempfile;
 extern crate which;
 
 use std::collections::HashMap;
@@ -71,8 +71,10 @@ use std::fs;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::str;
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
+use tempfile::{NamedTempFile, TempPath};
 
 mod executable;
 
@@ -210,7 +212,97 @@ enum ToolFamily {
     Msvc { clang_cl: bool },
 }
 
+/// An error returned when parsing a string into a [`ToolFamily`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParseToolFamilyError(());
+
+impl std::str::FromStr for ToolFamily {
+    type Err = ParseToolFamilyError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        use ToolFamily::*;
+        match s {
+            "gnu" => Ok(Gnu),
+            "clang" => Ok(Clang),
+            "msvc_clang" => Ok(Msvc { clang_cl: true }),
+            "msvc" => Ok(Msvc { clang_cl: false }),
+            _ => Err(ParseToolFamilyError(())),
+        }
+    }
+}
+
 impl ToolFamily {
+    /// Determine the `ToolFamily` of an `Executable`.
+    ///
+    /// This takes an `Executable` instead of a `Command` to obtain the guarantees that the has
+    /// already been checked to run and that the result of `Executable::to_command` has no
+    /// behavior-changing context added to it.
+    pub fn detect(exe: &Executable) -> Result<ToolFamily, Error> {
+        // Create a temporary file that will serve as source to the compiler.
+        //
+        // We would prefer to pipe the source to `stdin`, but MSVC (`cl.exe`) does not support it.
+        let mut input: NamedTempFile = tempfile::Builder::new()
+            .prefix("cc_rs_tool_family_")
+            .suffix(".c")
+            .tempfile()?;
+
+        // Write the C preprocessor macros to the file. There should be no other content.
+        input.write_all(b"\
+            #if defined(_MSC_VER) && defined(__clang__)\n\
+            msvc_clang\n\
+            #elif defined(_MSC_VER)\n\
+            msvc\n\
+            #elif defined(__clang__)\n\
+            clang\n\
+            #elif defined(__GNUC__)\n\
+            gnu\n\
+            #else\n\
+            unknown\n\
+            #endif\n")?;
+
+        // Close the `NamedTempFile` but keep the `TempPath`.
+        //
+        // We do this so that another Windows process (the compiler being tested) can open the
+        // file. When the `TempPath` is dropped, the temporary file will be deleted.
+        let input: TempPath = input.into_temp_path();
+
+        // Try each of the known flags for expanding preprocessor input.
+        //
+        // MSVC (`cl.exe`) recognizes `-E`, so `/E` probably isn't necessary.
+        for flag in &["-E", "/E"] {
+            let mut cmd = exe.to_command();
+
+            // Feed the above flag and input file path into the compiler.
+            let output = {
+                cmd.arg(flag).arg(input.to_str().unwrap());
+                cmd.output()?
+            };
+
+            // Check if the compiler failed.
+            if !output.status.success() {
+                // If it did, we assume it was due to bad arguments. Let's try the next flag.
+                continue;
+            }
+
+            // Don't assume the entire output is UTF-8. Only assume that lines end in `\n`.
+            let stdout = BufReader::new(&output.stdout[..]);
+
+            // Parse each line of the compiler output.
+            for line in stdout.split(b'\n').filter_map(|l| l.ok()) {
+                // Given that our input is ASCII, we care only if a line is valid ASCII.
+                for line in str::from_utf8(&line[..]) {
+                    // For a successful parse, stop everything and return the result.
+                    for tool_family in line.parse() {
+                        return Ok(tool_family);
+                    }
+                }
+            }
+        }
+
+        // Finally, we assume that any unknown compiler is a member of the Gnu family.
+        // FIXME: We should have a better fallback than this.
+        Ok(ToolFamily::Gnu)
+    }
+
     /// What the flag to request debug info for this family of tools look like
     fn add_debug_flags(&self, cmd: &mut Tool) {
         match *self {
@@ -1676,8 +1768,7 @@ impl Build {
     fn get_base_compiler(&self) -> Result<Tool, Error> {
         // Return the user-provided compiler.
         if let Some(ref path) = self.compiler {
-            let exe = Executable::new(path, "User-provided")?;
-            return Ok(Tool::new(exe, false));
+            return Executable::new(path, "User-provided").and_then(|exe| Tool::compiler(exe, self.cuda));
         }
 
         // Set up some variables depending on whether we are targeting C++ or C.
@@ -1697,10 +1788,10 @@ impl Build {
         // number of conditions to consider as you read further.
 
         // First, the priority goes to the environment variable (`CC` or `CXX`).
-        let tool: Option<Tool> = self
-            .env_tool(env)
-            .map(|(exe, wrapper, args)| {
-                let mut tool = Tool::new(exe, self.cuda);
+        let tool: Option<Tool> = match self.env_tool(env) {
+            None => None,
+            Some((exe, wrapper, args)) => {
+                let mut tool = Tool::compiler(exe, self.cuda)?;
                 if let Some(wrapper) = wrapper {
                     assert!(!self.cuda, "Using a wrapper ({:?}) with CUDA is not currently supported.  Contributions welcome!", &wrapper);
                     tool.cc_wrapper_path = Some(wrapper);
@@ -1708,8 +1799,9 @@ impl Build {
                 for arg in args {
                     tool.cc_wrapper_args.push(arg.into());
                 }
-                tool
-            });
+                Some(tool)
+            }
+        };
 
         // Next, we look at targets that work on Windows.
 
@@ -1718,8 +1810,7 @@ impl Build {
             assert!(!self.cuda, "Emscripten with CUDA is not currently supported. Contributions welcome!");
             fn try_emscripten(cpp: bool) -> Result<Tool, Error> {
                 Executable::emscripten_compiler(cpp)
-                    .map(|e| Tool::new(e, false))
-                    .map_err(|e| e.into())
+                    .and_then(|exe| Tool::compiler(exe, false))
             }
             return tool.map(Result::Ok).unwrap_or_else(|| try_emscripten(self.cpp));
         }
@@ -1764,7 +1855,7 @@ impl Build {
             // MinGW
             if target.contains("gnu") {
                 assert!(!self.cuda, "MinGW with CUDA is not currently supported. Contributions welcome!");
-                return Ok(Tool::new(Executable::new(gnu, "MinGW default")?, false));
+                return Tool::compiler(Executable::new(gnu, "MinGW default")?, false);
 
             }
 
@@ -1775,36 +1866,35 @@ impl Build {
 
         // We have now ruled out Windows as a target. From this point, we can ignore Windows.
 
-        // This wrapper takes an `Executable` and builds a `Tool` from it. If we need CUDA, it
-        // builds the appropriate `Tool` using the path of the `Executable` in an argument.
-        fn tool_from_exe(build: &Build, target: &str, exe: Executable) -> Result<Tool, Error> {
+        // This wrapper takes an `Executable` and builds a compiler `Tool` from it. If we need
+        // CUDA, it builds the appropriate `Tool` using the `Executable` path.
+        fn to_compiler(build: &Build, target: &str, exe: Executable) -> Result<Tool, Error> {
             if build.cuda {
                 let mut tool = build.get_var("NVCC")
-                    .and_then(|s| Executable::new(s, "$NVCC").map_err(|e| e.into()))
+                    .and_then(|s| Executable::new(s, "$NVCC"))
                     .or_else(|_| Executable::new("nvcc", "Nvidia CUDA Compiler"))
-                    .map(|e| Tool::new(e, true))
-                    .map_err(|_| Error::new(ErrorKind::ToolNotFound, &format!("No CUDA tool found (target: {})", target)))?;
+                    .map_err(|_| Error::new(ErrorKind::ToolNotFound, &format!("CUDA compiler not found (target: {})", target)))
+                    .and_then(|exe| Tool::compiler(exe, true))?;
                 tool.args
                     .push(format!("-ccbin={}", exe.path().display()).into());
                 Ok(tool)
             } else {
-                Ok(Tool::new(exe, false))
+                Tool::compiler(exe, false)
             }
         };
-        let tool_from_exe = |exe| tool_from_exe(self, &target, exe);
+        let to_compiler = |exe| to_compiler(self, &target, exe);
 
         // Let's discharge the responsibility of keeping track of the `tool` from the env var.
         if let Some(tool) = tool {
             if self.cuda {
                 assert!(tool.args.is_empty() && tool.env.is_empty(), "For CUDA, we currently assume no arguments or env vars. Contributions welcome!");
-                return tool_from_exe(tool.exe);
+                return to_compiler(tool.exe);
             } else {
                 return Ok(tool);
             }
         }
 
         // From here, we don't use the above `tool`. We only want a default `Executable`.
-        let tool = |exe: Result<Executable, io::Error>| exe.map_err(|e| e.into()).and_then(tool_from_exe);
 
         // Android
         if target.contains("android") {
@@ -1816,24 +1906,26 @@ impl Build {
             let note = "Android default";
 
             // First try gnu and then clang.
-            return tool(Executable::new(format!("{}-{}", target, gnu), note)
-                .or_else(|_| Executable::new(format!("{}-{}", target, clang), note)));
+            return Executable::new(format!("{}-{}", target, gnu), note)
+                .or_else(|_| Executable::new(format!("{}-{}", target, clang), note))
+                .map_err(|_| Error::new(ErrorKind::ToolNotFound, &format!("Android compiler not found (target: {})", target)))
+                .and_then(to_compiler)
         }
 
         // CloudABI
         if target.contains("cloudabi") {
-            return tool(Executable::new(format!("{}-{}", target, traditional), "CloudABI default"));
+            return Executable::new(format!("{}-{}", target, traditional), "CloudABI default").and_then(to_compiler);
         }
 
         // WASM/WASI
         if target == "wasm32-wasi" || target == "wasm32-unknown-wasi" || target == "wasm32-unknown-unknown" {
             // FIXME: Should this be `clang` instead of `"clang"`? If not, add comment why.
-            return tool(Executable::new("clang", "WASM/WASI default"));
+            return Executable::new("clang", "WASM/WASI default").and_then(to_compiler);
         }
 
         // VxWorks
         if target.contains("vxworks") {
-            return tool(Executable::new("vx-cxx", "VxWorks C/C++ default"));
+            return Executable::new("vx-cxx", "VxWorks C/C++ default").and_then(to_compiler);
         }
 
         // We're approaching the end!
@@ -1909,18 +2001,18 @@ impl Build {
                     _ => None,
                 });
             if let Some(prefix) = cross_compile {
-                return tool(Executable::new(format!("{}-{}", prefix, gnu), "Cross-compiling default"));
+                return Executable::new(format!("{}-{}", prefix, gnu), "Cross-compiling default").and_then(to_compiler);
             }
         }
 
         // On Solaris, the `traditional` options (`cc`/`c++`) are unlikely to exist or be correct,
         // so we use `gnu` instead.
         if host.contains("solaris") {
-            return tool(Executable::new(gnu, "Solaris default"));
+            return Executable::new(gnu, "Solaris default").and_then(to_compiler);
         }
 
         // This is the end.
-        return tool(Executable::new(traditional, "Default"));
+        return Executable::new(traditional, "Default").and_then(to_compiler);
     }
 
     fn get_var(&self, var_base: &str) -> Result<String, Error> {
@@ -2164,36 +2256,30 @@ impl Default for Build {
 }
 
 impl Tool {
-
-    fn new(exe: Executable, cuda: bool) -> Tool {
-        // Try to detect family of the tool from its name, falling back to Gnu.
-        let family = if let Some(fname) = exe.path().file_name().and_then(|p| p.to_str()) {
-            if fname.contains("clang-cl") {
-                ToolFamily::Msvc { clang_cl: true }
-            } else if fname.contains("cl")
-                && !fname.contains("cloudabi")
-                && !fname.contains("uclibc")
-                && !fname.contains("clang")
-            {
-                ToolFamily::Msvc { clang_cl: false }
-            } else if fname.contains("clang") {
-                ToolFamily::Clang
-            } else {
-                ToolFamily::Gnu
-            }
-        } else {
-            ToolFamily::Gnu
-        };
+    /// Returns a generic (i.e. non-compiler) `Tool`. The `ToolFamily` is not detected.
+    ///
+    /// FIXME: This should be a different type since it doesn't require many fields and operations
+    /// that a compiler `Tool` requires.
+    fn new(exe: Executable) -> Tool {
         Tool {
             exe,
             cc_wrapper_path: None,
             cc_wrapper_args: Vec::new(),
             args: Vec::new(),
             env: Vec::new(),
-            family: family,
-            cuda: cuda,
+            family: ToolFamily::Gnu,
+            cuda: false,
             removed_args: Vec::new(),
         }
+    }
+
+    /// Returns a `Tool` for a compiler after detecting the `ToolFamily`.
+    fn compiler(exe: Executable, cuda: bool) -> Result<Tool, Error> {
+        let family = ToolFamily::detect(&exe)?;
+        let mut tool = Tool::new(exe);
+        tool.family = family;
+        tool.cuda = cuda;
+        Ok(tool)
     }
 
     /// Add an argument to be stripped from the final command arguments.
