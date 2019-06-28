@@ -13,6 +13,7 @@
 
 use std::process::Command;
 
+#[cfg(windows)]
 use executable::Executable;
 use Tool;
 

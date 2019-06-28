@@ -1821,7 +1821,9 @@ impl Build {
             if target.contains("msvc") {
                 assert!(!self.cuda, "MSVC with CUDA is not currently supported. Contributions welcome!");
 
-                let registry_tool = windows_registry::find_tool(&target, "cl.exe");
+                // Get `Tool` for `cl.exe` from the Windows Registry. We put it behind a closure to
+                // avoid running it if it's not needed.
+                let tool_from_registry = || windows_registry::find_tool(&target, "cl.exe");
 
                 let tool = match tool {
                     Some(mut tool) => {
@@ -1834,9 +1836,9 @@ impl Build {
                         //
                         // Setting up the environment ensures that we get a "works out of the box"
                         // experience.
-                        if let Some(registry_tool) = registry_tool {
-                            if tool.family == (ToolFamily::Msvc { clang_cl: true }) && tool.env.len() == 0 {
-                                for (k, v) in registry_tool.env.iter() {
+                        if tool.family == (ToolFamily::Msvc { clang_cl: true }) && tool.env.len() == 0 {
+                            if let Some(registry_tool) = tool_from_registry() {
+                                for (k, v) in registry_tool.env {
                                     tool.env.push((k.to_owned(), v.to_owned()));
                                 }
                             }
@@ -1844,8 +1846,12 @@ impl Build {
                         Ok(tool)
                     }
                     None => {
-                        registry_tool
+                        tool_from_registry()
                             .ok_or_else(|| Error::new(ErrorKind::ToolNotFound, &format!("No tool found for target ({})", target)))
+                            // FIXME: `windows_registry::find_tool` does not properly create a
+                            // `Tool` for a compiler. Most importantly, it does not set the
+                            // `ToolFamily`.
+                            .and_then(|t| t.to_compiler(false))
                     }
                 };
                 return tool;
@@ -2275,11 +2281,16 @@ impl Tool {
 
     /// Returns a `Tool` for a compiler after detecting the `ToolFamily`.
     fn compiler(exe: Executable, cuda: bool) -> Result<Tool, Error> {
-        let family = ToolFamily::detect(&exe)?;
-        let mut tool = Tool::new(exe);
-        tool.family = family;
-        tool.cuda = cuda;
-        Ok(tool)
+        Tool::new(exe).to_compiler(cuda)
+    }
+
+    /// Upgrades a `Tool` into a compiler by detecting the `ToolFamily` and setting the `cuda`
+    /// field.
+    fn to_compiler(mut self, cuda: bool) -> Result<Tool, Error> {
+        let family = ToolFamily::detect(&self.exe)?;
+        self.family = family;
+        self.cuda = cuda;
+        Ok(self)
     }
 
     /// Add an argument to be stripped from the final command arguments.
