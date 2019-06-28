@@ -1,9 +1,9 @@
+use std::collections::HashMap;
+use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use which::which;
-use std::collections::HashMap;
 
 /// A minimal representation of an executable such as a compiler, assembler, or other build tool.
 ///
@@ -14,13 +14,21 @@ use std::collections::HashMap;
 ///
 /// This representation is minimal in that it does not contain any context (arguments or
 /// environment variables) that would modify the behavior beyond its default operation. By keeping
-/// this invariant, we can re-use an `Executable` as a command in different contexts.
+/// this invariant, we can run `Executable::to_command` in multiple different contexts.
 #[derive(Clone)]
 pub struct Executable {
-    /// Information about the name and construction of the executable.
+    /// Requested name of the executable.
     ///
-    /// This is shown to the user in status and error messages.
-    info: Vec<String>,
+    /// This can be an absolute path, a relative path, or an executable found in a directory listed
+    /// in the `PATH` environment variable.
+    name: OsString,
+
+    /// A note with extra information about the source of the `name`.
+    ///
+    /// This is included in the `Debug` string. It can be useful for identifying problems with the
+    /// `Executable`. It does not need to include any other fields of the `Executable` since they
+    /// are already included in the `Debug` string.
+    note: String,
 
     /// Path of an executable.
     ///
@@ -42,108 +50,119 @@ pub struct Executable {
 
 impl fmt::Debug for Executable {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let mut info = self.info.iter();
-        if let Some(name) = info.next() {
-            write!(f, "{} (", name)?;
-            for s in info {
-                write!(f, "{}, ", s)?;
-            }
-            write!(f, "command: {:?})", self.to_command())?;
+        // Name
+        write!(f, "{:?} (", self.name)?;
+        // Note (possibly empty)
+        if !self.note.is_empty() {
+            write!(f, "{}, ", self.note)?;
         }
-        Ok(())
+        // Path
+        write!(f, "path: {:?}", self.path)?;
+        // Arguments (possibly empty)
+        if !self.args.is_empty() {
+            write!(f, ", args:")?;
+            for arg in &self.args {
+                write!(f, " \"{}\"", arg)?;
+            }
+        }
+        // Environment variables (possibly empty)
+        if !self.envs.is_empty() {
+            write!(f, ", envs:")?;
+            for (name, val) in &self.envs {
+                write!(f, " {}=\"{}\"", name, val)?;
+            }
+        }
+        write!(f, ")")
     }
 }
 
 impl Executable {
-    /// Create an `Executable` from a path, arguments, and environment variables.
-    fn from_path_with_context<P>(info: Vec<String>, path: P, args: Vec<String>, envs: HashMap<String, String>) -> io::Result<Self>
-    where
-        P: AsRef<Path>,
-    {
-        let requested_path = path.as_ref();
+    /// Create an `Executable` with a context of arguments and environment variables.
+    pub fn with_context<N: Into<OsString>, S: Into<String>>(
+        name: N,
+        note: S,
+        args: Vec<String>,
+        envs: HashMap<String, String>,
+    ) -> io::Result<Self> {
+        let name = name.into();
+        let note = note.into();
 
-        // Check if the request path exists and traverse symbolic links to find the canonical path.
-        let canonical_path = requested_path.canonicalize()?.into();
+        // Find the path of the executable. `name` can be an absolute path, a relative path, or an
+        // executable found in one of the directories of the `PATH` environment variable.
+        let path = which::which(&name)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("{} ({:?})", e, name)))?;
 
-        // Build the debug information, adding the requested path if it's different from the
-        // canonical path.
-        let mut info = info;
-        if requested_path != canonical_path {
-            info.push(format!("requested path: {}", requested_path.to_string_lossy()));
-        }
+        // Traverse symbolic links to find the canonical path.
+        let path = path.canonicalize()?.into();
 
-        Ok(Executable {
-            info,
-            path: canonical_path,
+        // Build the `Executable` and test that it can be run.
+        let exe = Executable {
+            name,
+            note,
+            path,
             args,
             envs,
-        })
+        };
+        exe.to_command().spawn()?;
+
+        Ok(exe)
     }
 
-    /// Create an `Executable` from a path.
-    pub fn from_path<P>(info: Vec<String>, path: P) -> io::Result<Self>
-    where
-        P: AsRef<Path>,
-    {
-        Executable::from_path_with_context(info, path, Vec::new(), HashMap::new())
-    }
-
-    /// Create an `Executable` from the name (not the path) of an executable, arguments, and
-    /// environment variables.
-    ///
-    /// The directories of the `PATH` environment variable are searched to find the executable
-    /// name.
-    fn from_name_with_context<S>(info: Vec<String>, exe: S, args: Vec<String>, envs: HashMap<String, String>) -> io::Result<Self>
-    where
-        S: Into<String>,
-    {
-        let path = which(exe.into()).map_err(|e| io::Error::new(io::ErrorKind::Other, format!("{}", e)))?;
-        Executable::from_path_with_context(info, path, args, envs)
-    }
-
-    /// Create an `Executable` from the name of executable.
-    ///
-    /// The executable must be found in one of the directories in the `PATH` environment.
-    pub fn from_name<S>(info: Vec<String>, exe: S) -> io::Result<Self>
-    where
-        S: Into<String>,
-    {
-        Executable::from_name_with_context(info, exe, Vec::new(), HashMap::new())
+    /// Create an `Executable` with no arguments or environment variables.
+    pub fn new<N: Into<OsString>, S: Into<String>>(name: N, note: S) -> io::Result<Self> {
+        Executable::with_context(name, note, Vec::new(), HashMap::new())
     }
 
     /// Create an `Executable` for Emscripten.
     pub fn emscripten(cpp: bool) -> io::Result<Self> {
         let (name, exe) = if cpp {
-            ("Emscripten C++".to_string(), "em++")
+            ("Emscripten C++", "em++")
         } else {
-            ("Emscripten C".to_string(), "emcc")
+            ("Emscripten C", "emcc")
         };
-
-        // Build the info vector with added capacity for the requested path.
-        let mut info = Vec::with_capacity(2);
-        info.push(name);
 
         if cfg!(windows) {
             // Emscripten on Windows uses a batch file.
-            Executable::from_name_with_context(info, "cmd", vec!["/c".to_string(), format!("{}.bat", exe)], HashMap::new())
+            Executable::with_context(
+                "cmd",
+                name,
+                vec!["/c".to_string(), format!("{}.bat", exe)],
+                HashMap::new(),
+            )
         } else {
-            Executable::from_name(info, exe)
+            Executable::new(exe, name)
         }
     }
 
     /// Returns a `Command` to run the `Executable`.
-    fn to_command(&self) -> Command {
+    pub fn to_command(&self) -> Command {
         let mut cmd = Command::new(&self.path);
         cmd.envs(&self.envs);
         cmd.args(&self.args);
         cmd
     }
 
-    /// Returns the `Path` of the `Executable`.
+    /// Returns the name used to build the `Executable`.
+    pub fn name(&self) -> &OsStr {
+        &self.name
+    }
+
+    /// Returns the path of the `Executable`.
     ///
-    /// FIXME: We should not need this because the path may be something like `sh` or `cmd.exe` and
-    /// used to invoke a script.
+    /// WARNING! You can't always assume that this is the actual path of a compiler or other tool.
+    /// In some cases, it may be something like `sh` or `cmd.exe`. It depends on how the
+    /// `Executable` was constructed.
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Returns the arguments to the `Executable`.
+    pub fn args(&self) -> &Vec<String> {
+        &self.args
+    }
+
+    /// Returns the environment variables for the `Executable`.
+    pub fn envs(&self) -> &HashMap<String, String> {
+        &self.envs
     }
 }
