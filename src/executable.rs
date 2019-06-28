@@ -17,13 +17,13 @@ use std::process::Command;
 /// this invariant, we can run `Executable::to_command` in multiple different contexts.
 #[derive(Clone)]
 pub struct Executable {
-    /// Requested name of the executable.
+    /// Name of the executable requested at the construction of the `Executable`.
     ///
-    /// This can be an absolute path, a relative path, or an executable found in a directory listed
-    /// in the `PATH` environment variable.
+    /// This can be an absolute path, a relative path, or the name of an executable that should be
+    /// found in a directory listed in the `PATH` environment variable.
     name: OsString,
 
-    /// A note with extra information about the source of the `name`.
+    /// Note with extra information about the source of the `name`.
     ///
     /// This is included in the `Debug` string. It can be useful for identifying problems with the
     /// `Executable`. It does not need to include any other fields of the `Executable` since they
