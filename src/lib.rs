@@ -1804,7 +1804,7 @@ impl Build {
         }
 
         // From here, we don't use the above `tool`. We only want a default `Executable`.
-        let tool = |exe| tool_from_exe(exe);
+        let tool = |exe: Result<Executable, io::Error>| exe.map_err(|e| e.into()).and_then(tool_from_exe);
 
         // Android
         if target.contains("android") {
@@ -1816,26 +1816,24 @@ impl Build {
             let note = "Android default";
 
             // First try gnu and then clang.
-            return Executable::new(format!("{}-{}", target, gnu), note)
-                .or_else(|_| Executable::new(format!("{}-{}", target, clang), note))
-                .map_err(|e| e.into())
-                .and_then(tool);
+            return tool(Executable::new(format!("{}-{}", target, gnu), note)
+                .or_else(|_| Executable::new(format!("{}-{}", target, clang), note)));
         }
 
         // CloudABI
         if target.contains("cloudabi") {
-            return tool(Executable::new(format!("{}-{}", target, traditional), "CloudABI default")?);
+            return tool(Executable::new(format!("{}-{}", target, traditional), "CloudABI default"));
         }
 
         // WASM/WASI
         if target == "wasm32-wasi" || target == "wasm32-unknown-wasi" || target == "wasm32-unknown-unknown" {
             // FIXME: Should this be `clang` instead of `"clang"`? If not, add comment why.
-            return tool(Executable::new("clang", "WASM/WASI default")?);
+            return tool(Executable::new("clang", "WASM/WASI default"));
         }
 
         // VxWorks
         if target.contains("vxworks") {
-            return tool(Executable::new("vx-cxx", "VxWorks C/C++ default")?);
+            return tool(Executable::new("vx-cxx", "VxWorks C/C++ default"));
         }
 
         // We're approaching the end!
@@ -1911,18 +1909,18 @@ impl Build {
                     _ => None,
                 });
             if let Some(prefix) = cross_compile {
-                return tool(Executable::new(format!("{}-{}", prefix, gnu), "Cross-compiling default")?);
+                return tool(Executable::new(format!("{}-{}", prefix, gnu), "Cross-compiling default"));
             }
         }
 
         // On Solaris, the `traditional` options (`cc`/`c++`) are unlikely to exist or be correct,
         // so we use `gnu` instead.
         if host.contains("solaris") {
-            return tool(Executable::new(gnu, "Solaris default")?);
+            return tool(Executable::new(gnu, "Solaris default"));
         }
 
         // This is the end.
-        return tool(Executable::new(traditional, "Default")?);
+        return tool(Executable::new(traditional, "Default"));
     }
 
     fn get_var(&self, var_base: &str) -> Result<String, Error> {
