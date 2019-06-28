@@ -49,6 +49,8 @@ pub struct Executable {
 }
 
 impl fmt::Debug for Executable {
+    /// Format a debug string for an `Executable`. Note that, unlike `Command`, this includes all
+    /// information, including environment variables.
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         // Name
         write!(f, "{:?} (", self.name)?;
