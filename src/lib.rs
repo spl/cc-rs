@@ -872,8 +872,6 @@ impl Build {
         self
     }
 
-/*
-
     /// Run the compiler, generating the file `output`
     ///
     /// This will return a result instead of panicing; see compile() for the complete description.
@@ -1008,12 +1006,7 @@ impl Build {
             }
             (
                 cmd,
-                compiler
-                    .path
-                    .file_name()
-                    .ok_or_else(|| Error::new(ErrorKind::IOError, "Failed to get compiler path."))?
-                    .to_string_lossy()
-                    .into_owned(),
+                compiler.exe.name().to_string_lossy().into_owned(),
             )
         };
         let is_arm = target.contains("aarch64") || target.contains("arm");
@@ -1046,12 +1039,7 @@ impl Build {
             cmd.arg(file);
         }
 
-        let name = compiler
-            .path
-            .file_name()
-            .ok_or_else(|| Error::new(ErrorKind::IOError, "Failed to get compiler path."))?
-            .to_string_lossy()
-            .into_owned();
+        let name = compiler.exe.name().to_string_lossy().into_owned();
 
         Ok(run_output(&mut cmd, &name)?)
     }
@@ -1074,8 +1062,6 @@ impl Build {
             Ok(v) => v,
         }
     }
-
-*/
 
     /// Get the compiler that's in use for this configuration.
     ///
@@ -1707,7 +1693,7 @@ impl Build {
         // Here begins the logic to find the `Tool`.
 
         // First, the priority goes to the environment variable (`CC` or `CXX`).
-        let mut tool: Option<Tool> = self
+        let tool: Option<Tool> = self
             .env_tool(env)
             .map(|(exe, wrapper, args)| {
                 let mut tool = Tool::new(exe, self.cuda);
