@@ -1,5 +1,6 @@
 extern crate cc;
 extern crate tempdir;
+extern crate which;
 
 use std::env;
 use std::ffi::OsString;

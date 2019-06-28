@@ -94,6 +94,10 @@ impl Test {
             args: s.lines().map(|s| s.to_string()).collect(),
         }
     }
+
+    pub fn which<S: AsRef<OsStr>>(&self, name: S) -> PathBuf {
+        which::which_in(name, Some(self.path()), self.td.path()).unwrap().canonicalize().unwrap()
+    }
 }
 
 impl Execution {
