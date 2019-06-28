@@ -13,6 +13,7 @@
 
 use std::process::Command;
 
+use executable::Executable;
 use Tool;
 
 #[cfg(windows)]
@@ -74,13 +75,7 @@ pub fn find_tool(target: &str, tool: &str) -> Option<Tool> {
     // If VCINSTALLDIR is set, then someone's probably already run vcvars and we
     // should just find whatever that indicates.
     if env::var_os("VCINSTALLDIR").is_some() {
-        return env::var_os("PATH")
-            .and_then(|path| {
-                env::split_paths(&path)
-                    .map(|p| p.join(tool))
-                    .find(|p| p.exists())
-            })
-            .map(|path| Tool::new(path.into()));
+        return Executable::new(tool, "From VCINSTALLDIR").ok().map(Tool::new);
     }
 
     // Ok, if we're here, now comes the fun part of the probing. Default shells
@@ -184,6 +179,7 @@ mod impl_ {
     use std::iter;
     use std::path::{Path, PathBuf};
 
+    use executable::Executable;
     use Tool;
 
     struct MsvcTool {
@@ -203,14 +199,14 @@ mod impl_ {
             }
         }
 
-        fn into_tool(self) -> Tool {
+        fn into_tool<S: Into<String>>(self, note: S) -> Tool {
             let MsvcTool {
                 tool,
                 libs,
                 path,
                 include,
             } = self;
-            let mut tool = Tool::new(tool.into());
+            let mut tool = Tool::new(Executable::new(tool, note).unwrap());
             add_env(&mut tool, "LIB", libs);
             add_env(&mut tool, "PATH", path);
             add_env(&mut tool, "INCLUDE", include);
@@ -241,7 +237,7 @@ mod impl_ {
             if !path.is_file() {
                 return None;
             }
-            let mut tool = Tool::new(path);
+            let mut tool = Tool::new(Executable::new(path, "VS 16").unwrap());
             if target.contains("x86_64") {
                 tool.env.push(("Platform".into(), "X64".into()));
             }
@@ -311,7 +307,7 @@ mod impl_ {
         }
 
         path.map(|path| {
-            let mut tool = Tool::new(path);
+            let mut tool = Tool::new(Executable::new(path, "VS 15").unwrap());
             if target.contains("x86_64") {
                 tool.env.push(("Platform".into(), "X64".into()));
             }
@@ -339,7 +335,7 @@ mod impl_ {
 
         otry!(add_sdks(&mut tool, target));
 
-        Some(tool.into_tool())
+        Some(tool.into_tool("VS 15"))
     }
 
     fn vs15_vc_paths(
@@ -395,7 +391,7 @@ mod impl_ {
         let vcdir = otry!(get_vc_dir("14.0"));
         let mut tool = otry!(get_tool(tool, &vcdir, target));
         otry!(add_sdks(&mut tool, target));
-        Some(tool.into_tool())
+        Some(tool.into_tool("MSVC 14"))
     }
 
     fn add_sdks(tool: &mut MsvcTool, target: &str) -> Option<()> {
@@ -446,7 +442,7 @@ mod impl_ {
         tool.include.push(sdk_include.join("shared"));
         tool.include.push(sdk_include.join("um"));
         tool.include.push(sdk_include.join("winrt"));
-        Some(tool.into_tool())
+        Some(tool.into_tool("MSVC 12"))
     }
 
     // For MSVC 11 we need to find the Windows 8 SDK.
@@ -462,7 +458,7 @@ mod impl_ {
         tool.include.push(sdk_include.join("shared"));
         tool.include.push(sdk_include.join("um"));
         tool.include.push(sdk_include.join("winrt"));
-        Some(tool.into_tool())
+        Some(tool.into_tool("MSVC 11"))
     }
 
     fn add_env(tool: &mut Tool, env: &str, paths: Vec<PathBuf>) {
@@ -751,7 +747,7 @@ mod impl_ {
             .map(|path| {
                 let mut path = PathBuf::from(path);
                 path.push("MSBuild.exe");
-                let mut tool = Tool::new(path);
+                let mut tool = Tool::new(Executable::new(path, "Old MSBuild").unwrap());
                 if target.contains("x86_64") {
                     tool.env.push(("Platform".into(), "X64".into()));
                 }
