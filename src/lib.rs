@@ -1713,7 +1713,7 @@ impl Build {
         if target.contains("emscripten") {
             assert!(!self.cuda, "Emscripten with CUDA is not currently supported. Contributions welcome!");
             fn try_emscripten(cpp: bool) -> Result<Tool, Error> {
-                Executable::emscripten(cpp)
+                Executable::emscripten_compiler(cpp)
                     .map(|e| Tool::new(e, false))
                     .map_err(|e| e.into())
             }

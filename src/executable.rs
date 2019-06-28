@@ -116,7 +116,7 @@ impl Executable {
     }
 
     /// Create an `Executable` for Emscripten.
-    pub fn emscripten(cpp: bool) -> io::Result<Self> {
+    pub fn emscripten_compiler(cpp: bool) -> io::Result<Self> {
         let (name, exe) = if cpp {
             ("Emscripten C++", "em++")
         } else {
