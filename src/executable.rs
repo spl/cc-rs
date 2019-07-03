@@ -130,7 +130,7 @@ impl Executable {
         Executable::with_context(name, note, Vec::new(), HashMap::new())
     }
 
-    /// Create an `Executable` for Emscripten.
+    /// Create an `Executable` for the Emscripten compiler.
     pub fn emscripten_compiler(cpp: bool) -> Result<Self, Error> {
         let (name, exe) = if cpp {
             ("Emscripten C++", "em++")
@@ -148,6 +148,22 @@ impl Executable {
             )
         } else {
             Executable::new(exe, name)
+        }
+    }
+
+    /// Create an `Executable` for the Emscripten archiver.
+    pub fn emscripten_archiver() -> Result<Self, Error> {
+        let note = "Emscripten archiver".to_string();
+        if cfg!(windows) {
+            // Emscripten on Windows uses a batch file.
+            Executable::with_context(
+                "cmd",
+                note,
+                vec!["/c".to_string(), "emar.bat".to_string()],
+                HashMap::new(),
+            )
+        } else {
+            Executable::new("emar", note)
         }
     }
 
