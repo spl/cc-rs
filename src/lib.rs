@@ -76,7 +76,7 @@ use std::thread::{self, JoinHandle};
 
 mod executable;
 
-use executable::Executable;
+use executable::{Executable, ExecutablePath};
 
 // These modules are all glue to support reading the MSVC version from
 // the registry and from COM interfaces
@@ -113,6 +113,7 @@ pub struct Build {
     target: Option<String>,
     host: Option<String>,
     out_dir: Option<PathBuf>,
+    paths: Option<OsString>,
     opt_level: Option<String>,
     debug: Option<bool>,
     env: Vec<(OsString, OsString)>,
@@ -166,6 +167,18 @@ impl Error {
 impl From<io::Error> for Error {
     fn from(e: io::Error) -> Error {
         Error::new(ErrorKind::IOError, &format!("{}", e))
+    }
+}
+
+impl From<executable::Error> for Error {
+    fn from(e: executable::Error) -> Error {
+        use ErrorKind::*;
+        use executable::Error::*;
+        match e {
+            WhichError { name } => Error::new(ToolNotFound, &format!("Can't find path of `{:?}`", name)),
+            CanonicalizeError { name, path } => Error::new(ToolNotFound, &format!("Can't resolve canonical path of `{:?}` (path: {:?})", name, path)),
+            SpawnError { exe } => Error::new(ToolExecError, &format!("Can't run: {}", exe)),
+        }
     }
 }
 
@@ -253,12 +266,12 @@ impl ToolFamily {
     /// This takes an `Executable` instead of a `Command` to obtain the guarantees that the has
     /// already been checked to run and that the result of `Executable::to_command` has no
     /// behavior-changing context added to it.
-    pub fn detect(cuda: bool, cpp: bool, path: &Path, exe: &Executable) -> Result<ToolFamily, Error> {
+    pub fn detect<P: AsRef<Path>>(out_dir: P, exe: &Executable) -> Result<ToolFamily, Error> {
         // Create a temporary file that will serve as source to the compiler.
         //
         // We would prefer to pipe the source to `stdin`, but MSVC (`cl.exe`) does not support it.
         // Write the C preprocessor macros to the file. There should be no other content.
-        let input = ensure_source_file(cuda, cpp, path, "cc_rs_tool_family", b"\
+        let input = ensure_source_file(out_dir, "cc_rs_tool_family.h", b"\
             #if defined(_MSC_VER) && defined(__clang__)\n\
             msvc_clang\n\
             #elif defined(_MSC_VER)\n\
@@ -425,6 +438,7 @@ impl Build {
             target: None,
             host: None,
             out_dir: None,
+            paths: None,
             opt_level: None,
             debug: None,
             env: Vec::new(),
@@ -500,7 +514,29 @@ impl Build {
     }
 
     fn ensure_check_file(&self) -> Result<PathBuf, Error> {
-        ensure_source_file(self.cuda, self.cpp, self.get_out_dir()?, "cc_rs_flag_check", b"int main(void) {{ return 0; }}")
+        let ext = if self.cuda {
+            "cu"
+        } else if self.cpp {
+            "cpp"
+        } else {
+            "c"
+        };
+        let file = format!("cc_rs_flag_check.{}", ext);
+        ensure_source_file(self.get_out_dir()?, file, b"int main(void) {{ return 0; }}")
+    }
+
+    fn clone_for_flag_check(&self) -> Self {
+        let mut cfg = Build::new();
+        cfg.flags = self.flags.clone();
+        cfg.host = self.host.clone();
+        cfg.target = self.target.clone();
+        cfg.out_dir = self.out_dir.clone();
+        cfg.paths = self.paths.clone();
+        cfg.opt_level(0)
+            .debug(false)
+            .cpp(self.cpp)
+            .cuda(self.cuda);
+        cfg
     }
 
     /// Run the compiler to test if it accepts the given flag.
@@ -515,6 +551,7 @@ impl Build {
     /// `known_flag_support` field. If `is_flag_supported(flag)`
     /// is called again, the result will be read from the hash table.
     pub fn is_flag_supported(&self, flag: &str) -> Result<bool, Error> {
+        println!("### is_flag_supported: flag={}", flag);
         let mut known_status = self.known_flag_support_status.lock().unwrap();
         if let Some(is_supported) = known_status.get(flag).cloned() {
             return Ok(is_supported);
@@ -524,18 +561,9 @@ impl Build {
         let src = self.ensure_check_file()?;
         let obj = out_dir.join("flag_check");
         let target = self.get_target()?;
-        let host = self.get_host()?;
-        let mut cfg = Build::new();
-        // TODO: Added for the `gnu_flag_if_supported` test. Should it be here?
-        cfg.flags = self.flags.clone();
-        cfg.flag(flag)
-            .target(&target)
-            .opt_level(0)
-            .host(&host)
-            .debug(false)
-            .cpp(self.cpp)
-            .cuda(self.cuda);
-        let mut compiler = cfg.try_get_compiler()?;
+        let cfg = self.clone_for_flag_check();
+        let compiler = cfg.try_get_compiler();
+        let mut compiler = compiler?;
 
         // Clang uses stderr for verbose output, which yields a false positive
         // result if the CFLAGS/CXXFLAGS include -v to aid in debugging.
@@ -947,13 +975,9 @@ impl Build {
     }
 
     #[doc(hidden)]
-    pub fn __set_env<A, B>(&mut self, a: A, b: B) -> &mut Build
-    where
-        A: AsRef<OsStr>,
-        B: AsRef<OsStr>,
+    pub fn paths<P: Into<OsString>>(&mut self, val: P) -> &mut Build
     {
-        self.env
-            .push((a.as_ref().to_owned(), b.as_ref().to_owned()));
+        self.paths.replace(val.into());
         self
     }
 
@@ -1595,9 +1619,13 @@ impl Build {
 
         let objects: Vec<_> = objs.iter().map(|obj| obj.dst.clone()).collect();
         let target = self.get_target()?;
-        if target.contains("msvc") {
+
+        let (mut cmd, program) = {
             let exe = self.get_ar()?;
-            let mut cmd = exe.to_command();
+            (exe.to_command(), exe.name().to_string_lossy().into_owned())
+        };
+
+        if target.contains("msvc") {
             let mut out = OsString::from("/OUT:");
             out.push(dst);
             cmd.arg(out).arg("/nologo");
@@ -1642,8 +1670,13 @@ impl Build {
             } else {
                 cmd.args(&objects).args(&self.objects);
             }
-            run(&mut cmd, &exe.name().to_string_lossy())?;
+        } else {
+            cmd.arg("crs").arg(dst).args(&objects).args(&self.objects);
+        }
 
+        run(&mut cmd, &program)?;
+
+        if target.contains("msvc") {
             // The Rust compiler will look for libfoo.a and foo.lib, but the
             // MSVC linker will also be passed foo.lib, so be sure that both
             // exist for now.
@@ -1661,12 +1694,6 @@ impl Build {
                     ));
                 }
             };
-        } else {
-            let exe = self.get_ar()?;
-            run(
-                exe.to_command().arg("crs").arg(dst).args(&objects).args(&self.objects),
-                &exe.name().to_string_lossy(),
-            )?;
         }
 
         Ok(())
@@ -1759,19 +1786,15 @@ impl Build {
         cmd
     }
 
-
     /// This function includes all of the underlying logic to find the compiler.
     ///
     /// The approach is to discharge the required conditions and `return` as soon as they are
     /// fulfilled. This allows us to keep the flow simple by avoiding `else` and reducing the
     /// number of conditions to consider as you read further.
     fn get_base_compiler(&self) -> Result<Tool, Error> {
-        let out_dir = &self.get_out_dir()?;
-
         // First, if the user provided a compiler path, use that.
         if let Some(ref path) = self.compiler {
-            return Executable::new(path, "User-provided compiler")
-                .and_then(|exe| Tool::compiler(out_dir, exe, self.cuda, self.cpp));
+            return self.new_compiler(self.exe(path, "User-provided compiler")?);
         }
 
         // Set up some variables depending on whether we are targeting C++ or C.
@@ -1788,7 +1811,7 @@ impl Build {
         let tool: Option<Tool> = match self.env_tool(env) {
             None => None,
             Some((exe, wrapper, args)) => {
-                let mut tool = Tool::compiler(out_dir, exe, self.cuda, self.cpp)?;
+                let mut tool = self.new_compiler(exe)?;
                 if let Some(wrapper) = wrapper {
                     assert!(!self.cuda, "Using a wrapper ({:?}) with CUDA is not currently supported.  Contributions welcome!", &wrapper);
                     tool.cc_wrapper_path = Some(wrapper);
@@ -1805,11 +1828,7 @@ impl Build {
         // Emscripten
         if target.contains("emscripten") {
             assert!(!self.cuda, "Emscripten with CUDA is not currently supported. Contributions welcome!");
-            fn try_emscripten(out_dir: &Path, cpp: bool) -> Result<Tool, Error> {
-                Executable::emscripten_compiler(cpp)
-                    .and_then(|exe| Tool::compiler(out_dir, exe, false, cpp))
-            }
-            return tool.map(Result::Ok).unwrap_or_else(|| try_emscripten(out_dir, self.cpp));
+            return tool.map(Result::Ok).unwrap_or_else(|| self.emscripten_compiler());
         }
 
         // Windows
@@ -1848,7 +1867,7 @@ impl Build {
                             // FIXME: `windows_registry::find_tool` does not properly create a
                             // `Tool` for a compiler. Most importantly, it does not set the
                             // `ToolFamily`.
-                            .and_then(|t| t.to_compiler(out_dir, false, self.cpp))
+                            .and_then(|t| t.to_compiler(self.get_out_dir()?, false))
                     }
                 };
                 return tool;
@@ -1858,7 +1877,7 @@ impl Build {
             // MinGW
             if target.contains("gnu") {
                 assert!(!self.cuda, "MinGW with CUDA is not currently supported. Contributions welcome!");
-                return Tool::compiler(out_dir, Executable::new(gnu, "MinGW default")?, false, self.cpp);
+                return self.new_compiler(self.exe(gnu, "MinGW default")?);
 
             }
 
@@ -1872,18 +1891,17 @@ impl Build {
         // This wrapper takes an `Executable` and builds a compiler `Tool` from it. If we need
         // CUDA, it builds the appropriate `Tool` using the `Executable` path.
         fn to_compiler(build: &Build, target: &str, exe: Executable) -> Result<Tool, Error> {
-            let out_dir = &build.get_out_dir()?;
             if build.cuda {
                 let mut tool = build.get_var("NVCC")
-                    .and_then(|s| Executable::new(s, "$NVCC"))
-                    .or_else(|_| Executable::new("nvcc", "Nvidia CUDA Compiler"))
+                    .and_then(|s| build.exe(s, "$NVCC"))
+                    .or_else(|_| build.exe("nvcc", "Nvidia CUDA Compiler"))
                     .map_err(|_| Error::new(ErrorKind::ToolNotFound, &format!("CUDA compiler not found (target: {})", target)))
-                    .and_then(|exe| Tool::compiler(out_dir, exe, true, build.cpp))?;
+                    .and_then(|exe| build.new_compiler(exe))?;
                 tool.args
                     .push(format!("-ccbin={}", exe.path().display()).into());
                 Ok(tool)
             } else {
-                Tool::compiler(out_dir, exe, false, build.cpp)
+                build.new_compiler(exe)
             }
         };
         let to_compiler = |exe| to_compiler(self, &target, exe);
@@ -1910,26 +1928,26 @@ impl Build {
             let note = "Android default";
 
             // First try gnu and then clang.
-            return Executable::new(format!("{}-{}", target, gnu), note)
-                .or_else(|_| Executable::new(format!("{}-{}", target, clang), note))
+            return self.exe(format!("{}-{}", target, gnu), note)
+                .or_else(|_| self.exe(format!("{}-{}", target, clang), note))
                 .map_err(|_| Error::new(ErrorKind::ToolNotFound, &format!("Android compiler not found (target: {})", target)))
                 .and_then(to_compiler)
         }
 
         // CloudABI
         if target.contains("cloudabi") {
-            return Executable::new(format!("{}-{}", target, traditional), "CloudABI default").and_then(to_compiler);
+            return self.exe(format!("{}-{}", target, traditional), "CloudABI default").and_then(to_compiler);
         }
 
         // WASM/WASI
         if target == "wasm32-wasi" || target == "wasm32-unknown-wasi" || target == "wasm32-unknown-unknown" {
             // FIXME: Should this be `clang` instead of `"clang"`? If not, add comment why.
-            return Executable::new("clang", "WASM/WASI default").and_then(to_compiler);
+            return self.exe("clang", "WASM/WASI default").and_then(to_compiler);
         }
 
         // VxWorks
         if target.contains("vxworks") {
-            return Executable::new("vx-cxx", "VxWorks C/C++ default").and_then(to_compiler);
+            return self.exe("vx-cxx", "VxWorks C/C++ default").and_then(to_compiler);
         }
 
         // We're approaching the end!
@@ -2005,18 +2023,18 @@ impl Build {
                     _ => None,
                 });
             if let Some(prefix) = cross_compile {
-                return Executable::new(format!("{}-{}", prefix, gnu), "Cross-compiling default").and_then(to_compiler);
+                return self.exe(format!("{}-{}", prefix, gnu), "Cross-compiling default").and_then(to_compiler);
             }
         }
 
         // On Solaris, the `traditional` options (`cc`/`c++`) are unlikely to exist or be correct,
         // so we use `gnu` instead.
         if host.contains("solaris") {
-            return Executable::new(gnu, "Solaris default").and_then(to_compiler);
+            return self.exe(gnu, "Solaris default").and_then(to_compiler);
         }
 
         // This is the end.
-        return Executable::new(traditional, "Default").and_then(to_compiler);
+        return self.exe(traditional, "Default").and_then(to_compiler);
     }
 
     fn get_var(&self, var_base: &str) -> Result<String, Error> {
@@ -2065,7 +2083,7 @@ impl Build {
         // If this is an exact path on the filesystem we don't want to do any
         // interpretation at all, just pass it on through. This'll hopefully get
         // us to support spaces-in-paths.
-        if let Ok(exe) = Executable::new(var_value, var_name) {
+        if let Ok(exe) = self.exe(var_value, var_name) {
             return Some((exe, None, Vec::new()));
         }
 
@@ -2098,7 +2116,7 @@ impl Build {
             Some(s) => s,
             None => return None,
         };
-        let first_part_exe = match Executable::new(first_part, format!("{}=\"{}\"", var_name, var_value)) {
+        let first_part_exe = match self.exe(first_part, format!("{}=\"{}\"", var_name, var_value)) {
             Ok(exe) => exe,
             Err(_) => return None,
         };
@@ -2110,7 +2128,8 @@ impl Build {
             .unwrap();
         if known_wrappers.contains(&file_stem) {
             if let Some(name) = parts.next() {
-                if let Ok(compiler_exe) = Executable::new(name, var_name) {
+                // Ensure the second part is an executable and can be run.
+                if let Ok(compiler_exe) = self.exe(name, var_name) {
                     return Some((
                             compiler_exe,
                             Some(first_part_exe.path().to_path_buf()),
@@ -2165,12 +2184,12 @@ impl Build {
     fn get_ar(&self) -> Result<Executable, Error> {
         // First, if the user provided an archiver path, use that.
         if let Some(path) = &self.archiver {
-            return Executable::new(path, "User-provided archiver");
+            return self.exe(path, "User-provided archiver");
         }
 
         // Then, the priority goes to the environment variable (`AR`).
         if let Ok(path) = self.get_var("AR") {
-            return Executable::new(path, "$AR");
+            return self.exe(path, "$AR");
         }
 
         let target = self.get_target()?;
@@ -2178,22 +2197,22 @@ impl Build {
         // Next, we look at target defaults.
 
         if target.contains("emscripten") {
-            return Executable::emscripten_archiver();
+            return self.emscripten_archiver();
         }
 
         if target.contains("msvc") {
             match windows_registry::find_tool(&target, "lib.exe") {
                 Some(tool) => return Ok(tool.exe),
-                None => return Executable::new("lib.exe", "MSVC default archiver"),
+                None => return self.exe("lib.exe", "MSVC default archiver"),
             }
         }
 
         if target.contains("android") {
-            return Executable::new(format!("{}-ar", target.replace("armv7", "arm")), "Android default archiver");
+            return self.exe(format!("{}-ar", target.replace("armv7", "arm")), "Android default archiver");
         }
 
         // This is the end.
-        return Executable::new("ar", "Default archiver");
+        return self.exe("ar", "Default archiver");
     }
 
     fn get_target(&self) -> Result<String, Error> {
@@ -2257,6 +2276,91 @@ impl Build {
         }
     }
 
+    /// Create an `ExecutablePath`.
+    fn exe_path<N: Into<OsString>>(&self, name: N) -> Result<ExecutablePath, Error> {
+        Ok(ExecutablePath::new_in(name, self.get_out_dir()?, (&self.paths).as_ref())?)
+    }
+
+    /// Create an `Executable` with context (arguments and environment variables).
+    fn exe_with_context<N, S>(
+        &self,
+        name: N,
+        note: S,
+        args: Vec<String>,
+        envs: HashMap<String, String>,
+    ) -> Result<Executable, Error>
+    where
+        N: Into<OsString>,
+        S: Into<String>,
+    {
+        Ok(Executable::new_with(self.exe_path(name)?, note, args, envs)?)
+    }
+
+    /// Create an `Executable` with context (arguments and environment variables).
+    fn exe<N, S>(&self, name: N, note: S) -> Result<Executable, Error>
+    where
+        N: Into<OsString>,
+        S: Into<String>,
+    {
+        self.exe_with_context(name, note, Vec::new(), HashMap::new())
+    }
+
+    /// Create a compiler `Tool` from an `Executable`.
+    fn new_compiler(&self, exe: Executable) -> Result<Tool, Error> {
+        Tool::compiler(exe, self.get_out_dir()?, self.cuda)
+    }
+
+    /// Create an `Executable` for the Emscripten compiler.
+    fn emscripten_compiler(&self) -> Result<Tool, Error> {
+        let (note, name) = if self.cpp {
+            ("Emscripten C++", "em++")
+        } else {
+            ("Emscripten C", "emcc")
+        };
+
+        let exe = if cfg!(windows) {
+            // Emscripten on Windows uses a batch file.
+            let name = format!("{}.bat", name);
+
+            // Ensure the batch file exists.
+            self.exe_path(&name)?;
+
+            // Use `cmd` to run the batch file.
+            self.exe_with_context(
+                "cmd",
+                note,
+                vec!["/c".to_string(), name],
+                HashMap::new(),
+            )
+        } else {
+            self.exe(name, note)
+        };
+
+        self.new_compiler(exe?)
+    }
+
+    /// Create an `Executable` for the Emscripten archiver.
+    pub fn emscripten_archiver(&self) -> Result<Executable, Error> {
+        let note = "Emscripten archiver".to_string();
+        if cfg!(windows) {
+            // Emscripten on Windows uses a batch file.
+            let name = "emar.bat".to_string();
+
+            // Ensure the batch file exists.
+            self.exe_path(&name)?;
+
+            // Use `cmd` to run the batch file.
+            self.exe_with_context(
+                "cmd",
+                note,
+                vec!["/c".to_string(), name],
+                HashMap::new(),
+            )
+        } else {
+            self.exe("emar", note)
+        }
+    }
+
     fn print(&self, s: &str) {
         if self.cargo_metadata {
             println!("{}", s);
@@ -2275,7 +2379,9 @@ impl Tool {
     ///
     /// FIXME: This should be a different type since it doesn't require many fields and operations
     /// that a compiler `Tool` requires.
-    fn new(exe: Executable) -> Tool {
+    fn new(exe: Executable) -> Tool
+    where
+        {
         Tool {
             exe,
             cc_wrapper_path: None,
@@ -2289,14 +2395,14 @@ impl Tool {
     }
 
     /// Returns a `Tool` for a compiler after detecting the `ToolFamily`.
-    fn compiler(path: &Path, exe: Executable, cuda: bool, cpp: bool) -> Result<Tool, Error> {
-        Tool::new(exe).to_compiler(path, cuda, cpp)
+    fn compiler<P: AsRef<Path>>(exe: Executable, out_dir: P, cuda: bool) -> Result<Tool, Error> {
+        Tool::new(exe).to_compiler(out_dir, cuda)
     }
 
     /// Upgrades a `Tool` into a compiler by detecting the `ToolFamily` and setting the `cuda`
     /// field.
-    fn to_compiler(mut self, path: &Path, cuda: bool, cpp: bool) -> Result<Tool, Error> {
-        let family = ToolFamily::detect(cuda, cpp, path, &self.exe)?;
+    fn to_compiler<P: AsRef<Path>>(mut self, out_dir: P, cuda: bool) -> Result<Tool, Error> {
+        let family = ToolFamily::detect(out_dir, &self.exe)?;
         self.family = family;
         self.cuda = cuda;
         Ok(self)
@@ -2361,9 +2467,9 @@ impl Tool {
     /// command returned will already have the initial arguments and environment
     /// variables configured.
     pub fn to_command(&self) -> Command {
-        let mut cmd = match self.cc_wrapper_path {
-            Some(ref cc_wrapper_path) => {
-                let mut cmd = Command::new(&cc_wrapper_path);
+        let mut cmd = match &self.cc_wrapper_path {
+            Some(cc_wrapper_path) => {
+                let mut cmd = Command::new(cc_wrapper_path);
                 cmd.arg(self.exe.path());
                 cmd
             }
@@ -2381,6 +2487,7 @@ impl Tool {
         for &(ref k, ref v) in self.env.iter() {
             cmd.env(k, v);
         }
+
         cmd
     }
 
@@ -2571,22 +2678,12 @@ fn fail(s: &str) -> ! {
     std::process::exit(1);
 }
 
-fn ensure_source_file<P, S>(cuda: bool, cpp: bool, dir: P, name: S, content: &[u8]) -> Result<PathBuf, Error>
-    where
-        P: AsRef<Path>,
-        S: Into<String>, {
-    let ext = if cuda {
-        ".cu"
-    } else if cpp {
-        ".cpp"
-    } else {
-        ".c"
-    };
-    let src = dir.as_ref().join(name.into() + ext);
-    if !src.exists() {
-        fs::File::create(&src)?.write_all(content)?;
+fn ensure_source_file<P: AsRef<Path>, S: AsRef<str>>(dir: P, name: S, content: &[u8]) -> Result<PathBuf, Error> {
+    let file = dir.as_ref().join(Path::new(name.as_ref()));
+    if !file.exists() {
+        fs::File::create(&file)?.write_all(content)?;
     }
-    Ok(src)
+    Ok(file)
 }
 
 fn command_add_output_file(cmd: &mut Command, dst: &Path, msvc: bool, is_asm: bool, is_arm: bool) {

@@ -14,7 +14,7 @@
 use std::process::Command;
 
 #[cfg(windows)]
-use executable::Executable;
+use executable::{Executable, ExecutablePath};
 use Tool;
 
 #[cfg(windows)]
@@ -76,7 +76,10 @@ pub fn find_tool(target: &str, tool: &str) -> Option<Tool> {
     // If VCINSTALLDIR is set, then someone's probably already run vcvars and we
     // should just find whatever that indicates.
     if env::var_os("VCINSTALLDIR").is_some() {
-        return Executable::new(tool, "From VCINSTALLDIR").ok().map(Tool::new);
+        return ExecutablePath::new(tool)
+            .and_then(|path| Executable::new(path, "$VCINSTALLDIR"))
+            .ok()
+            .map(Tool::new);
     }
 
     // Ok, if we're here, now comes the fun part of the probing. Default shells
@@ -180,18 +183,18 @@ mod impl_ {
     use std::iter;
     use std::path::{Path, PathBuf};
 
-    use executable::Executable;
+    use executable::{Executable, ExecutablePath};
     use Tool;
 
     struct MsvcTool {
-        tool: PathBuf,
+        tool: Executable,
         libs: Vec<PathBuf>,
         path: Vec<PathBuf>,
         include: Vec<PathBuf>,
     }
 
     impl MsvcTool {
-        fn new(tool: PathBuf) -> MsvcTool {
+        fn new(tool: Executable) -> MsvcTool {
             MsvcTool {
                 tool: tool,
                 libs: Vec::new(),
@@ -200,14 +203,14 @@ mod impl_ {
             }
         }
 
-        fn into_tool<S: Into<String>>(self, note: S) -> Tool {
+        fn into_tool(self) -> Tool {
             let MsvcTool {
                 tool,
                 libs,
                 path,
                 include,
             } = self;
-            let mut tool = Tool::new(Executable::new(tool, note).unwrap());
+            let mut tool: Tool = Tool::new(tool);
             add_env(&mut tool, "LIB", libs);
             add_env(&mut tool, "PATH", path);
             add_env(&mut tool, "INCLUDE", include);
@@ -234,11 +237,8 @@ mod impl_ {
 
     fn find_tool_in_vs16_path(tool: &str, target: &str) -> Option<Tool> {
         vs16_instances().filter_map(|path| {
-            let path = path.join(tool);
-            if !path.is_file() {
-                return None;
-            }
-            let mut tool = Tool::new(Executable::new(path, "VS 16").unwrap());
+            let exe = into_exe(path.join(tool), "VS 16")?;
+            let mut tool = Tool::new(exe);
             if target.contains("x86_64") {
                 tool.env.push(("Platform".into(), "X64".into()));
             }
@@ -285,30 +285,29 @@ mod impl_ {
     //
     // [more reliable]: https://github.com/alexcrichton/cc-rs/pull/331
     fn find_tool_in_vs15_path(tool: &str, target: &str) -> Option<Tool> {
-        let mut path = match vs15_instances() {
+        let mut exe = match vs15_instances() {
             Some(instances) => instances
                 .filter_map(|instance| {
                     instance
                         .ok()
                         .and_then(|instance| instance.installation_path().ok())
                 })
-                .map(|path| PathBuf::from(path).join(tool))
-                .find(|ref path| path.is_file()),
+                .filter_map(|path| into_exe(PathBuf::from(path).join(tool), "VS 15 via SetupConfiguration"))
+                .next(),
             None => None,
         };
 
-        if path.is_none() {
+        if exe.is_none() {
             let key = r"SOFTWARE\WOW6432Node\Microsoft\VisualStudio\SxS\VS7";
-            path = LOCAL_MACHINE
+            exe = LOCAL_MACHINE
                 .open(key.as_ref())
                 .ok()
                 .and_then(|key| key.query_str("15.0").ok())
-                .map(|path| PathBuf::from(path).join(tool))
-                .and_then(|path| if path.is_file() { Some(path) } else { None });
+                .and_then(|path| into_exe(PathBuf::from(path).join(tool), "VS 15 via registry"))
         }
 
-        path.map(|path| {
-            let mut tool = Tool::new(Executable::new(path, "VS 15").unwrap());
+        exe.map(|exe| {
+            let mut tool = Tool::new(exe);
             if target.contains("x86_64") {
                 tool.env.push(("Platform".into(), "X64".into()));
             }
@@ -319,11 +318,7 @@ mod impl_ {
     fn tool_from_vs15_instance(tool: &str, target: &str, instance: &SetupInstance) -> Option<Tool> {
         let (bin_path, host_dylib_path, lib_path, include_path) =
             otry!(vs15_vc_paths(target, instance));
-        let tool_path = bin_path.join(tool);
-        if !tool_path.exists() {
-            return None;
-        };
-
+        let tool_path = into_exe(bin_path.join(tool), "VS 15")?;
         let mut tool = MsvcTool::new(tool_path);
         tool.path.push(host_dylib_path);
         tool.libs.push(lib_path);
@@ -336,7 +331,7 @@ mod impl_ {
 
         otry!(add_sdks(&mut tool, target));
 
-        Some(tool.into_tool("VS 15"))
+        Some(tool.into_tool())
     }
 
     fn vs15_vc_paths(
@@ -390,9 +385,9 @@ mod impl_ {
     // the Windows 10 SDK or Windows 8.1 SDK.
     pub fn find_msvc_14(tool: &str, target: &str) -> Option<Tool> {
         let vcdir = otry!(get_vc_dir("14.0"));
-        let mut tool = otry!(get_tool(tool, &vcdir, target));
+        let mut tool = otry!(get_tool(tool, &vcdir, target, "MSVC 14"));
         otry!(add_sdks(&mut tool, target));
-        Some(tool.into_tool("MSVC 14"))
+        Some(tool.into_tool())
     }
 
     fn add_sdks(tool: &mut MsvcTool, target: &str) -> Option<()> {
@@ -433,7 +428,7 @@ mod impl_ {
     // For MSVC 12 we need to find the Windows 8.1 SDK.
     pub fn find_msvc_12(tool: &str, target: &str) -> Option<Tool> {
         let vcdir = otry!(get_vc_dir("12.0"));
-        let mut tool = otry!(get_tool(tool, &vcdir, target));
+        let mut tool = otry!(get_tool(tool, &vcdir, target, "MSVC 12"));
         let sub = otry!(lib_subdir(target));
         let sdk81 = otry!(get_sdk81_dir());
         tool.path.push(sdk81.join("bin").join(sub));
@@ -443,13 +438,13 @@ mod impl_ {
         tool.include.push(sdk_include.join("shared"));
         tool.include.push(sdk_include.join("um"));
         tool.include.push(sdk_include.join("winrt"));
-        Some(tool.into_tool("MSVC 12"))
+        Some(tool.into_tool())
     }
 
     // For MSVC 11 we need to find the Windows 8 SDK.
     pub fn find_msvc_11(tool: &str, target: &str) -> Option<Tool> {
         let vcdir = otry!(get_vc_dir("11.0"));
-        let mut tool = otry!(get_tool(tool, &vcdir, target));
+        let mut tool = otry!(get_tool(tool, &vcdir, target, "MSVC 11"));
         let sub = otry!(lib_subdir(target));
         let sdk8 = otry!(get_sdk8_dir());
         tool.path.push(sdk8.join("bin").join(sub));
@@ -459,7 +454,7 @@ mod impl_ {
         tool.include.push(sdk_include.join("shared"));
         tool.include.push(sdk_include.join("um"));
         tool.include.push(sdk_include.join("winrt"));
-        Some(tool.into_tool("MSVC 11"))
+        Some(tool.into_tool())
     }
 
     fn add_env(tool: &mut Tool, env: &str, paths: Vec<PathBuf>) {
@@ -472,7 +467,7 @@ mod impl_ {
 
     // Given a possible MSVC installation directory, we look for the linker and
     // then add the MSVC library path.
-    fn get_tool(tool: &str, path: &Path, target: &str) -> Option<MsvcTool> {
+    fn get_tool(tool: &str, path: &Path, target: &str, note: &str) -> Option<MsvcTool> {
         bin_subdir(target)
             .into_iter()
             .map(|(sub, host)| {
@@ -481,9 +476,9 @@ mod impl_ {
                     path.join("bin").join(host),
                 )
             })
-            .filter(|&(ref path, _)| path.is_file())
-            .map(|(path, host)| {
-                let mut tool = MsvcTool::new(path);
+            .filter_map(|(path, host)| into_exe(path, note).map(|exe| (exe, host)))
+            .map(|(exe, host)| {
+                let mut tool = MsvcTool::new(exe);
                 tool.path.push(host);
                 tool
             })
@@ -745,14 +740,23 @@ mod impl_ {
             .and_then(|key| {
                 max_version(&key).and_then(|(_vers, key)| key.query_str("MSBuildToolsPath").ok())
             })
-            .map(|path| {
+            .and_then(|path| {
                 let mut path = PathBuf::from(path);
                 path.push("MSBuild.exe");
-                let mut tool = Tool::new(Executable::new(path, "Old MSBuild").unwrap());
+                let exe = into_exe(path, "Old MSBuild")?;
+                let mut tool = Tool::new(exe);
                 if target.contains("x86_64") {
                     tool.env.push(("Platform".into(), "X64".into()));
                 }
-                tool
+                Some(tool)
             })
+    }
+
+    fn into_exe<S: Into<String>>(path: PathBuf, note: S) -> Option<Executable> {
+        let result = || {
+            let path = ExecutablePath::new(path)?;
+            Executable::new(path, note)
+        };
+        result().ok()
     }
 }

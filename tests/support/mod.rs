@@ -36,16 +36,14 @@ impl Test {
     }
 
     pub fn gnu() -> Test {
-        env::set_var("CC_RS_TOOL_FAMILY", "gnu");
         let t = Test::new();
         t.shim("cc").shim("c++").shim("ar");
         t
     }
 
     pub fn msvc() -> Test {
-        env::set_var("CC_RS_TOOL_FAMILY", "msvc");
         let mut t = Test::new();
-        t.shim("cl").shim("lib.exe");
+        t.shim("cl").shim("lib");
         t.msvc = true;
         t
     }
@@ -66,20 +64,15 @@ impl Test {
             "x86_64-unknown-linux-gnu"
         };
 
-        // Set the `PATH` so that `which` can find the shim executable.
-        env::set_var("PATH", self.path());
-
-        // Set the `OUT_DIR` for temporary files and the shim executable.
-        env::set_var("OUT_DIR", self.td.path());
-
         cfg.target(target)
             .host(target)
             .opt_level(2)
             .debug(false)
-            .out_dir(self.td.path());
+            .out_dir(self.td.path())
+            .paths(self.td.path());
         if self.msvc {
             cfg.compiler(self.td.path().join("cl"));
-            cfg.archiver(self.td.path().join("lib.exe"));
+            cfg.archiver(self.td.path().join("lib"));
         }
         cfg
     }
@@ -96,15 +89,15 @@ impl Test {
             .unwrap()
             .read_to_string(&mut s)
             .unwrap();
-        //println!("Output of {:?}:", self.td.path().join(format!("out{}", i)));
-        //println!("{}", s);
+        println!("Output of {:?}:", self.td.path().join(format!("out{}", i)));
+        println!("{}", s);
         Execution {
             args: s.lines().map(|s| s.to_string()).collect(),
         }
     }
 
     pub fn which<S: AsRef<OsStr>>(&self, name: S) -> PathBuf {
-        which::which_in(name, Some(self.path()), self.td.path()).unwrap().canonicalize().unwrap()
+        which::which_in(name, Some(self.td.path()), self.td.path()).unwrap().canonicalize().unwrap()
     }
 }
 

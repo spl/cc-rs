@@ -290,7 +290,7 @@ fn gnu_flag_if_supported_cpp() {
         .flag_if_supported("-std=c++11")
         .compile("foo");
 
-    test.cmd(0).must_have("-std=c++11");
+    test.cmd(1).must_have("-std=c++11");
 }
 
 #[test]
