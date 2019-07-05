@@ -181,7 +181,7 @@ impl ExecutablePath {
     /// `name` can be an absolute path, a path relative to `current_dir`, or the name of an
     /// executable that found in a directory listed in the `paths` (which should have the same
     /// format as the `PATH` environment variable).
-    pub fn new_in<N, P, S>(name: N, current_dir: P, paths: Option<S>) -> Result<Self, Error>
+    pub fn new_with<N, P, S>(name: N, current_dir: P, paths: Option<S>) -> Result<Self, Error>
     where
         N: Into<OsString>,
         P: AsRef<Path>,
@@ -225,8 +225,7 @@ impl ExecutablePath {
     pub fn to_command(&self) -> Command {
         let mut cmd = Command::new(&self.path);
 
-        // Preserve the expected current directory and paths if they were passed to the
-        // `ExecutablePath` at construction.
+        // Preserve the current directory and search paths as passed at construction.
         for current_dir in &self.current_dir {
             cmd.current_dir(current_dir);
         }

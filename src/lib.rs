@@ -2278,7 +2278,7 @@ impl Build {
 
     /// Create an `ExecutablePath`.
     fn exe_path<N: Into<OsString>>(&self, name: N) -> Result<ExecutablePath, Error> {
-        Ok(ExecutablePath::new_in(name, self.get_out_dir()?, (&self.paths).as_ref())?)
+        Ok(ExecutablePath::new_with(name, self.get_out_dir()?, (&self.paths).as_ref())?)
     }
 
     /// Create an `Executable` with context (arguments and environment variables).
