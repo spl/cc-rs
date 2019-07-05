@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use std::env;
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::io::prelude::*;
 use std::path::PathBuf;
@@ -75,12 +75,6 @@ impl Test {
             cfg.archiver(self.td.path().join("lib"));
         }
         cfg
-    }
-
-    fn path(&self) -> OsString {
-        let mut path = env::split_paths(&env::var_os("PATH").unwrap()).collect::<Vec<_>>();
-        path.insert(0, self.td.path().to_owned());
-        env::join_paths(path).unwrap()
     }
 
     pub fn cmd(&self, i: u32) -> Execution {
