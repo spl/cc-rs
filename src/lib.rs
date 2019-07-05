@@ -583,6 +583,11 @@ impl Build {
 
         cmd.arg(&src);
 
+        // Pass along the overridden `OUT_DIR` in case the compiler uses it.
+        for out_dir in &self.out_dir {
+            cmd.env("OUT_DIR", out_dir);
+        }
+
         let output = cmd.output()?;
         let is_supported = output.stderr.is_empty();
 
@@ -1125,6 +1130,11 @@ impl Build {
             cmd.arg(if msvc { "/c" } else { "-c" });
         }
         cmd.arg(&obj.src);
+
+        // Pass along the overridden `OUT_DIR` in case the compiler uses it.
+        for out_dir in &self.out_dir {
+            cmd.env("OUT_DIR", out_dir);
+        }
 
         run(&mut cmd, &name)?;
         Ok(())
@@ -1672,6 +1682,11 @@ impl Build {
             }
         } else {
             cmd.arg("crs").arg(dst).args(&objects).args(&self.objects);
+        }
+
+        // Pass along the overridden `OUT_DIR` in case the archiver uses it.
+        for out_dir in &self.out_dir {
+            cmd.env("OUT_DIR", out_dir);
         }
 
         run(&mut cmd, &program)?;

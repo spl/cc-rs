@@ -3,7 +3,7 @@
 use std::env;
 use std::fs::File;
 use std::io::prelude::*;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 fn main() {
     let mut args = env::args();
@@ -29,10 +29,10 @@ fn main() {
         _ => {}
     }
 
-    let out_dir = env::current_dir().expect(&format!(
-        "Program `{}` can't access the current directory",
+    let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect(&format!(
+        "Program `{}`: OUT_DIR not found",
         program
-    ));
+    )));
 
     for i in 0.. {
         let candidate = &out_dir.join(format!("out{}", i));
