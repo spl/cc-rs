@@ -175,8 +175,8 @@ impl From<executable::Error> for Error {
         use ErrorKind::*;
         use executable::Error::*;
         match e {
-            WhichError { name } => Error::new(ToolNotFound, &format!("Can't find path of `{:?}`", name)),
-            CanonicalizeError { name, path } => Error::new(ToolNotFound, &format!("Can't resolve canonical path of `{:?}` (path: {:?})", name, path)),
+            WhichError { name } => Error::new(ToolNotFound, &format!("Can't find path of `{}`", name.to_string_lossy())),
+            CanonicalizeError { name, path } => Error::new(ToolNotFound, &format!("Can't resolve canonical path of `{}` (path: {:?})", name.to_string_lossy(), path)),
             SpawnError { exe } => Error::new(ToolExecError, &format!("Can't run: {}", exe)),
         }
     }
@@ -2255,6 +2255,10 @@ impl Build {
         }
     }
 
+    fn get_paths(&self) -> Option<OsString> {
+        self.paths.clone().or(env::var_os("PATH"))
+    }
+
     fn getenv(&self, v: &str) -> Option<String> {
         let mut cache = self.env_cache.lock().unwrap();
         if let Some(val) = cache.get(v) {
@@ -2278,7 +2282,7 @@ impl Build {
 
     /// Create an `ExecutablePath`.
     fn exe_path<N: Into<OsString>>(&self, name: N) -> Result<ExecutablePath, Error> {
-        Ok(ExecutablePath::new_with(name, self.get_out_dir()?, (&self.paths).as_ref())?)
+        Ok(ExecutablePath::new_with(name, self.get_out_dir()?, self.get_paths())?)
     }
 
     /// Create an `Executable` with context (arguments and environment variables).
