@@ -116,13 +116,11 @@ impl Executable {
     }
 
     /// Returns the arguments to the `Executable`.
-    #[allow(dead_code)]
     pub fn args(&self) -> &Vec<String> {
         &self.args
     }
 
     /// Returns the environment variables for the `Executable`.
-    #[allow(dead_code)]
     pub fn envs(&self) -> &HashMap<String, String> {
         &self.envs
     }
