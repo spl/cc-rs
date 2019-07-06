@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 fn main() {
     let mut args = env::args();
-    let program = args.next().unwrap();
+    let program = args.next().expect("Program name not found in args");
     let args: Vec<_> = args.collect();
 
     // Handle special cases:
@@ -29,10 +29,9 @@ fn main() {
         _ => {}
     }
 
-    let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect(&format!(
-        "Program `{}`: OUT_DIR not found",
-        program
-    )));
+    let out_dir = PathBuf::from(
+        env::var_os("OUT_DIR").expect(&format!("Program `{}`: OUT_DIR not found", program)),
+    );
 
     for i in 0.. {
         let candidate = &out_dir.join(format!("out{}", i));
@@ -43,12 +42,23 @@ fn main() {
         }
 
         // Create a file and record the args passed to the command.
-        let mut f = File::create(candidate).unwrap();
+        let mut f = File::create(candidate).expect(&format!(
+            "Program `{}` can't create candidate: {:?}",
+            program, candidate
+        ));
         for arg in args {
-            writeln!(f, "{}", arg).unwrap();
+            writeln!(f, "{}", arg).expect(&format!(
+                "Program `{}` can't write to candidate: {:?}",
+                program, candidate
+            ));
         }
-
-        File::create(out_dir.join("libfoo.a")).unwrap();
         break;
     }
+
+    // Create a file used by some tests.
+    let path = &out_dir.join("libfoo.a");
+    File::create(path).expect(&format!(
+        "Program `{}` can't create libfoo.a: {:?}",
+        program, path
+    ));
 }
