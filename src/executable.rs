@@ -147,18 +147,6 @@ pub struct ExecutablePath {
 
     /// Verified, canonical, owned path of the executable.
     path: PathBuf,
-
-    /// Current working directory of the executable.
-    ///
-    /// We keep this to ensure the `Command` from `ExecutablePath::to_command` has the expected
-    /// environent.
-    current_dir: Option<PathBuf>,
-
-    /// Search paths in which the executable was found.
-    ///
-    /// We keep this to ensure the `Command` from `ExecutablePath::to_command` has the expected
-    /// environent.
-    paths: Option<OsString>,
 }
 
 impl ExecutablePath {
@@ -172,7 +160,7 @@ impl ExecutablePath {
     {
         let name = name.into();
         let result = which::which(&name);
-        ExecutablePath::from_which(name, result, None, None)
+        ExecutablePath::from_which(name, result)
     }
 
     /// Create an `ExecutablePath` given the name of an executable, a current directory, and an
@@ -188,19 +176,12 @@ impl ExecutablePath {
         S: AsRef<OsStr>,
     {
         let name = name.into();
-        let current_dir = current_dir.as_ref().to_path_buf();
-        let paths = paths.map(|s| s.as_ref().to_os_string());
-        let result = which::which_in(&name, paths.as_ref(), &current_dir);
-        ExecutablePath::from_which(name, result, Some(current_dir), paths)
+        let result = which::which_in(&name, paths, current_dir);
+        ExecutablePath::from_which(name, result)
     }
 
     /// Create an `ExecutablePath` from the result of `which::which` or `which::which_in`.
-    fn from_which(
-        name: OsString,
-        result: which::Result<PathBuf>,
-        current_dir: Option<PathBuf>,
-        paths: Option<OsString>,
-    ) -> Result<Self, Error> {
+    fn from_which(name: OsString, result: which::Result<PathBuf>) -> Result<Self, Error> {
         // Find the path of the executable in the search paths.
         let path = result.map_err(|_| Error::WhichError { name: name.clone() })?;
 
@@ -213,27 +194,12 @@ impl ExecutablePath {
             })?
             .into();
 
-        Ok(ExecutablePath {
-            name,
-            path,
-            current_dir,
-            paths,
-        })
+        Ok(ExecutablePath { name, path })
     }
 
     /// Creates a new `Command` with the `ExecutablePath`.
     pub fn to_command(&self) -> Command {
-        let mut cmd = Command::new(&self.path);
-
-        // Preserve the current directory and search paths as passed at construction.
-        for current_dir in &self.current_dir {
-            cmd.current_dir(current_dir);
-        }
-        for paths in &self.paths {
-            cmd.env("PATH", paths);
-        }
-
-        cmd
+        Command::new(&self.path)
     }
 
     pub fn name(&self) -> &OsStr {

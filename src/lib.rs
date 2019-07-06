@@ -2297,7 +2297,8 @@ impl Build {
 
     /// Create an `ExecutablePath`.
     fn exe_path<N: Into<OsString>>(&self, name: N) -> Result<ExecutablePath, Error> {
-        Ok(ExecutablePath::new_with(name, self.get_out_dir()?, self.get_paths())?)
+        // Use `Build::get_paths` to support overriding the search paths.
+        Ok(ExecutablePath::new_with(name, env::current_dir()?, self.get_paths())?)
     }
 
     /// Create an `Executable` with context (arguments and environment variables).
