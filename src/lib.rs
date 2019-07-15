@@ -60,6 +60,7 @@
 
 #[cfg(feature = "parallel")]
 extern crate rayon;
+extern crate which;
 
 use std::collections::HashMap;
 use std::env;
@@ -85,6 +86,9 @@ mod com;
 mod setup_config;
 
 pub mod windows_registry;
+
+mod executable;
+mod which2;
 
 /// A builder for compilation of a native static library.
 ///
