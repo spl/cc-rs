@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use std::env;
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::io;
 use std::io::prelude::*;
@@ -44,7 +44,7 @@ impl Test {
 
     pub fn msvc() -> Test {
         let mut t = Test::new();
-        t.shim("cl").shim("lib.exe");
+        t.shim("cl").shim("lib");
         t.msvc = true;
         t
     }
@@ -73,19 +73,13 @@ impl Test {
             .opt_level(2)
             .debug(false)
             .out_dir(self.td.path())
-            .__set_env("PATH", self.path())
+            .__set_env("PATH", self.td.path())
             .__set_env("GCCTEST_OUT_DIR", self.td.path());
         if self.msvc {
             cfg.compiler(self.td.path().join("cl"));
-            cfg.archiver(self.td.path().join("lib.exe"));
+            cfg.archiver(self.td.path().join("lib"));
         }
         cfg
-    }
-
-    fn path(&self) -> OsString {
-        let mut path = env::split_paths(&env::var_os("PATH").unwrap()).collect::<Vec<_>>();
-        path.insert(0, self.td.path().to_owned());
-        env::join_paths(path).unwrap()
     }
 
     pub fn cmd(&self, i: u32) -> Execution {
@@ -97,6 +91,12 @@ impl Test {
         Execution {
             args: s.lines().map(|s| s.to_string()).collect(),
         }
+    }
+
+    pub fn which<S: AsRef<OsStr>>(&self, name: S) -> PathBuf {
+        which::CanonicalPath::new_in(name, Some(self.td.path()), self.td.path())
+            .unwrap()
+            .into_path_buf()
     }
 }
 

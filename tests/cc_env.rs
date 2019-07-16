@@ -1,9 +1,8 @@
 extern crate cc;
 extern crate tempdir;
+extern crate which;
 
 use std::env;
-use std::ffi::OsString;
-use std::path::Path;
 
 mod support;
 use support::Test;
@@ -26,7 +25,7 @@ fn ccache() {
     env::set_var("CC", "ccache cc");
     let compiler = test.gcc().file("foo.c").get_compiler();
 
-    assert_eq!(compiler.path(), Path::new("cc"));
+    assert_eq!(compiler.path(), test.which("cc"));
 }
 
 fn ccache_spaces() {
@@ -35,7 +34,7 @@ fn ccache_spaces() {
 
     env::set_var("CC", "ccache        cc");
     let compiler = test.gcc().file("foo.c").get_compiler();
-    assert_eq!(compiler.path(), Path::new("cc"));
+    assert_eq!(compiler.path(), test.which("cc"));
 }
 
 fn distcc() {
@@ -44,7 +43,7 @@ fn distcc() {
 
     env::set_var("CC", "distcc cc");
     let compiler = test.gcc().file("foo.c").get_compiler();
-    assert_eq!(compiler.path(), Path::new("cc"));
+    assert_eq!(compiler.path(), test.which("cc"));
 }
 
 fn ccache_env_flags() {
@@ -53,11 +52,8 @@ fn ccache_env_flags() {
 
     env::set_var("CC", "ccache lol-this-is-not-a-compiler");
     let compiler = test.gcc().file("foo.c").get_compiler();
-    assert_eq!(compiler.path(), Path::new("lol-this-is-not-a-compiler"));
-    assert_eq!(
-        compiler.cc_env(),
-        OsString::from("ccache lol-this-is-not-a-compiler")
-    );
+    assert_eq!(compiler.path(), test.which("ccache"));
+    assert_eq!(compiler.cc_env(), "");
     assert!(
         compiler
             .cflags_env()
@@ -80,11 +76,11 @@ fn ccache_env_flags() {
 
 fn leading_spaces() {
     let test = Test::gnu();
-    test.shim("ccache");
+    test.shim("test");
 
     env::set_var("CC", " test ");
     let compiler = test.gcc().file("foo.c").get_compiler();
-    assert_eq!(compiler.path(), Path::new("test"));
+    assert_eq!(compiler.path(), test.which("test"));
 
     env::set_var("CC", "");
 }
@@ -95,20 +91,21 @@ fn extra_flags() {
 
     env::set_var("CC", "ccache cc -m32");
     let compiler = test.gcc().file("foo.c").get_compiler();
-    assert_eq!(compiler.path(), Path::new("cc"));
+    assert_eq!(compiler.path(), test.which("cc"));
 }
 
 fn path_to_ccache() {
     let test = Test::gnu();
     test.shim("ccache");
+    let ccache = test.which("ccache").into_os_string().into_string().unwrap();
+    let cc = test.which("cc");
 
-    env::set_var("CC", "/path/to/ccache.exe cc -m32");
+    env::set_var("CC", format!("{} cc -m32", ccache));
     let compiler = test.gcc().file("foo.c").get_compiler();
-    assert_eq!(compiler.path(), Path::new("cc"));
-    assert_eq!(
-        compiler.cc_env(),
-        OsString::from("/path/to/ccache.exe cc -m32"),
-    );
+    assert_eq!(compiler.path(), cc);
+    let cc_env = compiler.cc_env().into_string().unwrap();
+    let cc = cc.into_os_string().into_string().unwrap();
+    assert_eq!(cc_env, format!("{} {} -m32", ccache, cc));
 }
 
 fn more_spaces() {
@@ -117,5 +114,5 @@ fn more_spaces() {
 
     env::set_var("CC", "cc -m32");
     let compiler = test.gcc().file("foo.c").get_compiler();
-    assert_eq!(compiler.path(), Path::new("cc"));
+    assert_eq!(compiler.path(), test.which("cc"));
 }

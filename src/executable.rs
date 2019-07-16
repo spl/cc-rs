@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use super::Error;
 use super::ErrorKind::ToolNotFound;
 use std::collections::HashMap;
@@ -6,7 +8,7 @@ use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use which2 as which;
+use which2::CanonicalPath;
 
 /// A minimal representation of an executable such as a compiler, assembler, or other build tool.
 ///
@@ -31,7 +33,7 @@ pub struct Executable {
     requested: OsString,
 
     /// Verified canonical path of the executable.
-    path: which::CanonicalPath,
+    path: CanonicalPath,
 
     /// Note with extra information about the source of the `path`.
     ///
@@ -111,7 +113,8 @@ impl Executable {
     }
 }
 
-/// A builder for an `Executable`.
+/// A builder for either an `Executable` using `Build::exe` or a `CanonicalPath` of an executable
+/// using `Build::path`.
 #[derive(Clone, Debug)]
 pub struct Build {
     requested: OsString,
@@ -136,15 +139,15 @@ impl Build {
         }
     }
 
-    pub fn arg<T: Into<OsString>>(&mut self, arg: T) -> &mut Self {
-        self.args.push(arg.into());
+    pub fn arg<T: AsRef<OsStr>>(&mut self, arg: T) -> &mut Self {
+        self.args.push(arg.as_ref().into());
         self
     }
 
     pub fn args<I, T>(&mut self, args: I) -> &mut Self
     where
         I: IntoIterator<Item = T>,
-        T: Into<OsString>,
+        T: AsRef<OsStr>,
     {
         for arg in args {
             self.arg(arg);
@@ -152,16 +155,20 @@ impl Build {
         self
     }
 
-    pub fn env<T: Into<OsString>, U: Into<OsString>>(&mut self, var: T, val: U) -> &mut Self {
-        self.envs.insert(var.into(), val.into());
+    pub fn env<T, U>(&mut self, var: T, val: U) -> &mut Self
+    where
+        T: AsRef<OsStr>,
+        U: AsRef<OsStr>,
+    {
+        self.envs.insert(var.as_ref().into(), val.as_ref().into());
         self
     }
 
-    pub fn envs<I, K, V>(&mut self, envs: I) -> &mut Self
+    pub fn envs<'a, I, K, V>(&mut self, envs: I) -> &mut Self
     where
-        I: IntoIterator<Item = (K, V)>,
-        K: Into<OsString>,
-        V: Into<OsString>,
+        I: IntoIterator<Item = &'a (K, V)>,
+        K: 'a + AsRef<OsStr>,
+        V: 'a + AsRef<OsStr>,
     {
         for (var, val) in envs {
             self.env(var, val);
@@ -169,12 +176,12 @@ impl Build {
         self
     }
 
-    pub fn current_dir<T: Into<PathBuf>>(&mut self, current_dir: T) -> &mut Self {
-        self.current_dir.replace(current_dir.into());
+    pub fn current_dir<T: AsRef<Path>>(&mut self, current_dir: T) -> &mut Self {
+        self.current_dir.replace(current_dir.as_ref().into());
         self
     }
 
-    pub fn exe(mut self) -> Result<Executable, Error> {
+    fn take_path(&mut self) -> Result<CanonicalPath, Error> {
         // Get the search paths by first checking the environment variables for an optional
         // explicit use of `PATH` and then checking the environment itself.
         let paths: Option<OsString> = self
@@ -198,16 +205,25 @@ impl Build {
             })?;
 
         // Find the verified canonical path of the requested executable.
-        let path = which::CanonicalPath::new_in(&self.requested, paths.as_ref(), &current_dir)
-            .map_err(|e| {
-                Error::new(
-                    ToolNotFound,
-                    &format!(
-                        "{:?} (paths: {:?}, current_dir: {:?}): Can't find canonical path: {}",
-                        self.requested, paths, current_dir, e
-                    ),
-                )
-            })?;
+        CanonicalPath::new_in(&self.requested, paths.as_ref(), &current_dir).map_err(|e| {
+            Error::new(
+                ToolNotFound,
+                &format!(
+                    "{:?} (paths: {:?}, current_dir: {:?}): Can't find canonical path: {}",
+                    self.requested, paths, current_dir, e
+                ),
+            )
+        })
+    }
+
+    /// Convert the builder into a canonical path.
+    pub fn path(mut self) -> Result<CanonicalPath, Error> {
+        self.take_path()
+    }
+
+    /// Convert the builder into an executable.
+    pub fn exe(mut self) -> Result<Executable, Error> {
+        let path = self.take_path()?;
 
         // Construct and verify that it can be spawned.
         let exe = Executable {

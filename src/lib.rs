@@ -70,6 +70,7 @@ use std::fs;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::str;
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
@@ -89,6 +90,8 @@ pub mod windows_registry;
 
 mod executable;
 mod which2;
+
+use executable::Executable;
 
 /// A builder for compilation of a native static library.
 ///
@@ -182,8 +185,8 @@ impl Display for Error {
 /// compiler itself.
 #[derive(Clone, Debug)]
 pub struct Tool {
-    path: PathBuf,
-    cc_wrapper_path: Option<PathBuf>,
+    exe: Executable,
+    cc_wrapper_path: Option<Executable>,
     cc_wrapper_args: Vec<OsString>,
     args: Vec<OsString>,
     env: Vec<(OsString, OsString)>,
@@ -208,7 +211,87 @@ enum ToolFamily {
     Msvc { clang_cl: bool },
 }
 
+impl std::str::FromStr for ToolFamily {
+    type Err = ParseToolFamilyError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        use ToolFamily::*;
+        // These strings must be the same as those used in `Display` below.
+        match s {
+            "gnu" => Ok(Gnu),
+            "clang" => Ok(Clang),
+            "msvc_clang" => Ok(Msvc { clang_cl: true }),
+            "msvc" => Ok(Msvc { clang_cl: false }),
+            _ => Err(ParseToolFamilyError(())),
+        }
+    }
+}
+
+/// An error returned when parsing a string into a [`ToolFamily`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParseToolFamilyError(());
+
 impl ToolFamily {
+    /// Detect the `ToolFamily` of an `Executable`.
+    ///
+    /// This takes an `Executable` instead of a `Command` to obtain the guarantees that the has
+    /// already been checked to run and that the result of `Executable::to_command` has no
+    /// behavior-changing context added to it.
+    pub fn detect<P: AsRef<Path>>(out_dir: P, exe: &Executable) -> Result<ToolFamily, Error> {
+        // Create a temporary file that will serve as source to the compiler.
+        //
+        // We would prefer to pipe the source to `stdin`, but MSVC (`cl.exe`) does not support it.
+        // Write the C preprocessor macros to the file. There should be no other content.
+        let input = ensure_source_file(out_dir, "cc_rs_tool_family.h", b"\
+            #if defined(_MSC_VER) && defined(__clang__)\n\
+            msvc_clang\n\
+            #elif defined(_MSC_VER)\n\
+            msvc\n\
+            #elif defined(__clang__)\n\
+            clang\n\
+            #elif defined(__GNUC__)\n\
+            gnu\n\
+            #else\n\
+            unknown\n\
+            #endif\n")?;
+
+        // Try each of the known flags for expanding preprocessor input.
+        //
+        // MSVC (`cl.exe`) recognizes `-E`, so `/E` probably isn't necessary.
+        for flag in &["-E", "/E"] {
+            let mut cmd = exe.to_command();
+
+            // Feed the above flag and input file path into the compiler.
+            let output = {
+                cmd.arg(flag).arg(input.to_str().unwrap());
+                cmd.output()?
+            };
+
+            // Check if the compiler failed.
+            if !output.status.success() {
+                // If it did, we assume it was due to bad arguments. Let's try the next flag.
+                continue;
+            }
+
+            // Don't assume the entire output is UTF-8. Only assume that lines end in `\n`.
+            let stdout = BufReader::new(&output.stdout[..]);
+
+            // Parse each line of the compiler output.
+            for line in stdout.split(b'\n').filter_map(|l| l.ok()) {
+                // Given that our input is ASCII, we care only if a line is valid ASCII.
+                for line in str::from_utf8(&line[..]) {
+                    // For a successful parse, stop everything and return the result.
+                    for tool_family in line.parse() {
+                        return Ok(tool_family);
+                    }
+                }
+            }
+        }
+
+        // Finally, we assume that any unknown compiler is a member of the Gnu family.
+        // FIXME: We should have a better fallback than this.
+        Ok(ToolFamily::Gnu)
+    }
+
     /// What the flag to request debug info for this family of tools look like
     fn add_debug_flags(&self, cmd: &mut Tool) {
         match *self {
@@ -400,22 +483,15 @@ impl Build {
     }
 
     fn ensure_check_file(&self) -> Result<PathBuf, Error> {
-        let out_dir = self.get_out_dir()?;
-        let src = if self.cuda {
-            assert!(self.cpp);
-            out_dir.join("flag_check.cu")
+        let ext = if self.cuda {
+            "cu"
         } else if self.cpp {
-            out_dir.join("flag_check.cpp")
+            "cpp"
         } else {
-            out_dir.join("flag_check.c")
+            "c"
         };
-
-        if !src.exists() {
-            let mut f = fs::File::create(&src)?;
-            write!(f, "int main(void) {{ return 0; }}")?;
-        }
-
-        Ok(src)
+        let file = format!("cc_rs_flag_check.{}", ext);
+        ensure_source_file(self.get_out_dir()?, file, b"int main(void) {{ return 0; }}")
     }
 
     /// Run the compiler to test if it accepts the given flag.
@@ -439,16 +515,7 @@ impl Build {
         let src = self.ensure_check_file()?;
         let obj = out_dir.join("flag_check");
         let target = self.get_target()?;
-        let host = self.get_host()?;
-        let mut cfg = Build::new();
-        cfg.flag(flag)
-            .target(&target)
-            .opt_level(0)
-            .host(&host)
-            .debug(false)
-            .cpp(self.cpp)
-            .cuda(self.cuda);
-        let mut compiler = cfg.try_get_compiler()?;
+        let mut compiler = self.clone_for_flag_check().try_get_compiler()?;
 
         // Clang uses stderr for verbose output, which yields a false positive
         // result if the CFLAGS/CXXFLAGS include -v to aid in debugging.
@@ -473,6 +540,17 @@ impl Build {
 
         known_status.insert(flag.to_owned(), is_supported);
         Ok(is_supported)
+    }
+
+    fn clone_for_flag_check(&self) -> Self {
+        let mut cfg = Build::new();
+        cfg.flags = self.flags.clone();
+        cfg.host = self.host.clone();
+        cfg.target = self.target.clone();
+        cfg.out_dir = self.out_dir.clone();
+        cfg.env = self.env.clone();
+        cfg.opt_level(0).debug(false).cpp(self.cpp).cuda(self.cuda);
+        cfg
     }
 
     /// Add an arbitrary flag to the invocation of the compiler if it supports it
@@ -504,7 +582,6 @@ impl Build {
     ///     .shared_flag(true)
     ///     .compile("libfoo.so");
     /// ```
-
     pub fn shared_flag(&mut self, shared_flag: bool) -> &mut Build {
         self.shared_flag = Some(shared_flag);
         self
@@ -811,6 +888,7 @@ impl Build {
         self.archiver = Some(archiver.as_ref().to_owned());
         self
     }
+
     /// Define whether metadata should be emitted for cargo allowing it to
     /// automatically link the binary. Defaults to `true`.
     ///
@@ -1003,12 +1081,7 @@ impl Build {
             }
             (
                 cmd,
-                compiler
-                    .path
-                    .file_name()
-                    .ok_or_else(|| Error::new(ErrorKind::IOError, "Failed to get compiler path."))?
-                    .to_string_lossy()
-                    .into_owned(),
+                compiler.exe.requested().to_string_lossy().into_owned(),
             )
         };
         let is_arm = target.contains("aarch64") || target.contains("arm");
@@ -1041,13 +1114,7 @@ impl Build {
             cmd.arg(file);
         }
 
-        let name = compiler
-            .path
-            .file_name()
-            .ok_or_else(|| Error::new(ErrorKind::IOError, "Failed to get compiler path."))?
-            .to_string_lossy()
-            .into_owned();
-
+        let name = compiler.exe.requested().to_string_lossy().into_owned();
         Ok(run_output(&mut cmd, &name)?)
     }
 
@@ -1515,10 +1582,14 @@ impl Build {
         // appends to it, which we don't want.
         let _ = fs::remove_file(&dst);
 
+        let (mut cmd, program) = {
+            let exe = self.get_ar()?;
+            (exe.to_command(), exe.requested().to_string_lossy().into_owned())
+        };
+
         let objects: Vec<_> = objs.iter().map(|obj| obj.dst.clone()).collect();
         let target = self.get_target()?;
         if target.contains("msvc") {
-            let (mut cmd, program) = self.get_ar()?;
             let mut out = OsString::from("/OUT:");
             out.push(dst);
             cmd.arg(out).arg("/nologo");
@@ -1583,10 +1654,9 @@ impl Build {
                 }
             };
         } else {
-            let (mut ar, cmd) = self.get_ar()?;
             run(
-                ar.arg("crs").arg(dst).args(&objects).args(&self.objects),
-                &cmd,
+                cmd.arg("crs").arg(dst).args(&objects).args(&self.objects),
+                &program,
             )?;
         }
 
@@ -1680,213 +1750,262 @@ impl Build {
         cmd
     }
 
+    /// This function includes all of the underlying logic to find the compiler.
+    ///
+    /// The approach is to discharge the required conditions and `return` as soon as they are
+    /// fulfilled. This allows us to keep the flow simple by avoiding `else` and reducing the
+    /// number of conditions to consider as you read further.
     fn get_base_compiler(&self) -> Result<Tool, Error> {
-        if let Some(ref c) = self.compiler {
-            return Ok(Tool::new(c.clone()));
+        // First, if the user provided a compiler path, use that.
+        if let Some(path) = &self.compiler {
+            return Ok(self.new_compiler(self.build_exe(path, "User-provided compiler").exe()?)?);
         }
+
         let host = self.get_host()?;
         let target = self.get_target()?;
-        let (env, msvc, gnu, traditional, clang) = if self.cpp {
-            ("CXX", "cl.exe", "g++", "c++", "clang++")
+
+        // Set up some variables depending on whether we are targeting C++ or C.
+        let (env, gnu, traditional, clang) = if self.cpp {
+            ("CXX", "g++", "c++", "clang++")
         } else {
-            ("CC", "cl.exe", "gcc", "cc", "clang")
+            ("CC", "gcc", "cc", "clang")
         };
 
-        // On Solaris, c++/cc unlikely to exist or be correct.
-        let default = if host.contains("solaris") {
-            gnu
-        } else {
-            traditional
-        };
-
-        let cl_exe = windows_registry::find_tool(&target, "cl.exe");
-
-        let tool_opt: Option<Tool> = self
-            .env_tool(env)
-            .map(|(tool, cc, args)| {
-                // chop off leading/trailing whitespace to work around
-                // semi-buggy build scripts which are shared in
-                // makefiles/configure scripts (where spaces are far more
-                // lenient)
-                let mut t = Tool::new(PathBuf::from(tool.trim()));
-                if let Some(cc) = cc {
-                    t.cc_wrapper_path = Some(PathBuf::from(cc));
+        // Then, the priority goes to the environment variable (`CC` or `CXX`).
+        let tool: Option<Tool> = match self.env_tool(env) {
+            None => None,
+            Some((exe, wrapper, args)) => {
+                let mut tool = self.new_compiler(exe)?;
+                if let Some(wrapper) = wrapper {
+                    assert!(!self.cuda, "Using a wrapper ({:?}) with CUDA is not currently supported.  Contributions welcome!", &wrapper);
+                    tool.cc_wrapper_path = Some(wrapper);
                 }
                 for arg in args {
-                    t.cc_wrapper_args.push(arg.into());
+                    tool.cc_wrapper_args.push(arg.into());
                 }
-                t
-            })
-            .or_else(|| {
-                if target.contains("emscripten") {
-                    let tool = if self.cpp { "em++" } else { "emcc" };
-                    // Windows uses bat file so we have to be a bit more specific
-                    if cfg!(windows) {
-                        let mut t = Tool::new(PathBuf::from("cmd"));
-                        t.args.push("/c".into());
-                        t.args.push(format!("{}.bat", tool).into());
-                        Some(t)
-                    } else {
-                        Some(Tool::new(PathBuf::from(tool)))
-                    }
-                } else {
-                    None
-                }
-            })
-            .or_else(|| cl_exe.clone());
-
-        let tool = match tool_opt {
-            Some(t) => t,
-            None => {
-                let compiler = if host.contains("windows") && target.contains("windows") {
-                    if target.contains("msvc") {
-                        msvc.to_string()
-                    } else {
-                        format!("{}.exe", gnu)
-                    }
-                } else if target.contains("android") {
-                    let target = target
-                        .replace("armv7neon", "arm")
-                        .replace("armv7", "arm")
-                        .replace("thumbv7neon", "arm")
-                        .replace("thumbv7", "arm");
-                    let gnu_compiler = format!("{}-{}", target, gnu);
-                    let clang_compiler = format!("{}-{}", target, clang);
-                    // Check if gnu compiler is present
-                    // if not, use clang
-                    if Command::new(&gnu_compiler).spawn().is_ok() {
-                        gnu_compiler
-                    } else {
-                        clang_compiler
-                    }
-                } else if target.contains("cloudabi") {
-                    format!("{}-{}", target, traditional)
-                } else if target == "wasm32-wasi" ||
-                          target == "wasm32-unknown-wasi" ||
-                          target == "wasm32-unknown-unknown" {
-                    "clang".to_string()
-                } else if target.contains("vxworks") {
-		    "vx-cxx".to_string()
-		} else if self.get_host()? != target {
-                    // CROSS_COMPILE is of the form: "arm-linux-gnueabi-"
-                    let cc_env = self.getenv("CROSS_COMPILE");
-                    let cross_compile = cc_env.as_ref().map(|s| s.trim_right_matches('-'));
-                    let prefix = cross_compile.or(match &target[..] {
-                        "aarch64-unknown-linux-gnu" => Some("aarch64-linux-gnu"),
-                        "aarch64-unknown-linux-musl" => Some("aarch64-linux-musl"),
-                        "aarch64-unknown-netbsd" => Some("aarch64--netbsd"),
-                        "arm-unknown-linux-gnueabi" => Some("arm-linux-gnueabi"),
-                        "armv4t-unknown-linux-gnueabi" => Some("arm-linux-gnueabi"),
-                        "armv5te-unknown-linux-gnueabi" => Some("arm-linux-gnueabi"),
-                        "arm-frc-linux-gnueabi" => Some("arm-frc-linux-gnueabi"),
-                        "arm-unknown-linux-gnueabihf" => Some("arm-linux-gnueabihf"),
-                        "arm-unknown-linux-musleabi" => Some("arm-linux-musleabi"),
-                        "arm-unknown-linux-musleabihf" => Some("arm-linux-musleabihf"),
-                        "arm-unknown-netbsd-eabi" => Some("arm--netbsdelf-eabi"),
-                        "armv6-unknown-netbsd-eabihf" => Some("armv6--netbsdelf-eabihf"),
-                        "armv7-unknown-linux-gnueabihf" => Some("arm-linux-gnueabihf"),
-                        "armv7-unknown-linux-musleabihf" => Some("arm-linux-musleabihf"),
-                        "armv7neon-unknown-linux-gnueabihf" => Some("arm-linux-gnueabihf"),
-                        "armv7neon-unknown-linux-musleabihf" => Some("arm-linux-musleabihf"),
-                        "thumbv7-unknown-linux-gnueabihf" => Some("arm-linux-gnueabihf"),
-                        "thumbv7-unknown-linux-musleabihf" => Some("arm-linux-musleabihf"),
-                        "thumbv7neon-unknown-linux-gnueabihf" => Some("arm-linux-gnueabihf"),
-                        "thumbv7neon-unknown-linux-musleabihf" => Some("arm-linux-musleabihf"),
-                        "armv7-unknown-netbsd-eabihf" => Some("armv7--netbsdelf-eabihf"),
-                        "i586-unknown-linux-musl" => Some("musl"),
-                        "i686-pc-windows-gnu" => Some("i686-w64-mingw32"),
-                        "i686-uwp-windows-gnu" => Some("i686-w64-mingw32"),
-                        "i686-unknown-linux-musl" => Some("musl"),
-                        "i686-unknown-netbsd" => Some("i486--netbsdelf"),
-                        "mips-unknown-linux-gnu" => Some("mips-linux-gnu"),
-                        "mipsel-unknown-linux-gnu" => Some("mipsel-linux-gnu"),
-                        "mips64-unknown-linux-gnuabi64" => Some("mips64-linux-gnuabi64"),
-                        "mips64el-unknown-linux-gnuabi64" => Some("mips64el-linux-gnuabi64"),
-                        "mipsisa32r6-unknown-linux-gnu" => Some("mipsisa32r6-linux-gnu"),
-                        "mipsisa32r6el-unknown-linux-gnu" => Some("mipsisa32r6el-linux-gnu"),
-                        "mipsisa64r6-unknown-linux-gnuabi64" => Some("mipsisa64r6-linux-gnuabi64"),
-                        "mipsisa64r6el-unknown-linux-gnuabi64" => {
-                            Some("mipsisa64r6el-linux-gnuabi64")
-                        }
-                        "powerpc-unknown-linux-gnu" => Some("powerpc-linux-gnu"),
-                        "powerpc-unknown-linux-gnuspe" => Some("powerpc-linux-gnuspe"),
-                        "powerpc-unknown-netbsd" => Some("powerpc--netbsd"),
-                        "powerpc64-unknown-linux-gnu" => Some("powerpc-linux-gnu"),
-                        "powerpc64le-unknown-linux-gnu" => Some("powerpc64le-linux-gnu"),
-                        "s390x-unknown-linux-gnu" => Some("s390x-linux-gnu"),
-                        "sparc-unknown-linux-gnu" => Some("sparc-linux-gnu"),
-                        "sparc64-unknown-linux-gnu" => Some("sparc64-linux-gnu"),
-                        "sparc64-unknown-netbsd" => Some("sparc64--netbsd"),
-                        "sparcv9-sun-solaris" => Some("sparcv9-sun-solaris"),
-                        "armebv7r-none-eabi" => Some("arm-none-eabi"),
-                        "armebv7r-none-eabihf" => Some("arm-none-eabi"),
-                        "armv7r-none-eabi" => Some("arm-none-eabi"),
-                        "armv7r-none-eabihf" => Some("arm-none-eabi"),
-                        "thumbv6m-none-eabi" => Some("arm-none-eabi"),
-                        "thumbv7em-none-eabi" => Some("arm-none-eabi"),
-                        "thumbv7em-none-eabihf" => Some("arm-none-eabi"),
-                        "thumbv7m-none-eabi" => Some("arm-none-eabi"),
-                        "thumbv8m.base-none-eabi" => Some("arm-none-eabi"),
-                        "thumbv8m.main-none-eabi" => Some("arm-none-eabi"),
-                        "thumbv8m.main-none-eabihf" => Some("arm-none-eabi"),
-                        "x86_64-pc-windows-gnu" => Some("x86_64-w64-mingw32"),
-                        "x86_64-uwp-windows-gnu" => Some("x86_64-w64-mingw32"),
-                        "x86_64-rumprun-netbsd" => Some("x86_64-rumprun-netbsd"),
-                        "x86_64-unknown-linux-musl" => Some("musl"),
-                        "x86_64-unknown-netbsd" => Some("x86_64--netbsd"),
-                        _ => None,
-                    });
-                    match prefix {
-                        Some(prefix) => format!("{}-{}", prefix, gnu),
-                        None => default.to_string(),
-                    }
-                } else {
-                    default.to_string()
-                };
-                Tool::new(PathBuf::from(compiler))
+                Some(tool)
             }
         };
 
-        let mut tool = if self.cuda {
-            assert!(
-                tool.args.is_empty(),
-                "CUDA compilation currently assumes empty pre-existing args"
-            );
-            let nvcc = match self.get_var("NVCC") {
-                Err(_) => "nvcc".into(),
-                Ok(nvcc) => nvcc,
-            };
-            let mut nvcc_tool = Tool::with_features(PathBuf::from(nvcc), self.cuda);
-            nvcc_tool
-                .args
-                .push(format!("-ccbin={}", tool.path.display()).into());
-            nvcc_tool
-        } else {
-            tool
-        };
+        // Next, we look at targets that work on Windows.
 
-        // If we found `cl.exe` in our environment, the tool we're returning is
-        // an MSVC-like tool, *and* no env vars were set then set env vars for
-        // the tool that we're returning.
-        //
-        // Env vars are needed for things like `link.exe` being put into PATH as
-        // well as header include paths sometimes. These paths are automatically
-        // included by default but if the `CC` or `CXX` env vars are set these
-        // won't be used. This'll ensure that when the env vars are used to
-        // configure for invocations like `clang-cl` we still get a "works out
-        // of the box" experience.
-        if let Some(cl_exe) = cl_exe {
-            if tool.family == (ToolFamily::Msvc { clang_cl: true })
-                && tool.env.len() == 0
-                && target.contains("msvc")
-            {
-                for &(ref k, ref v) in cl_exe.env.iter() {
-                    tool.env.push((k.to_owned(), v.to_owned()));
-                }
+        // Emscripten
+        if target.contains("emscripten") {
+            assert!(!self.cuda, "Emscripten with CUDA is not currently supported. Contributions welcome!");
+            return tool.map(Result::Ok).unwrap_or_else(|| {
+                // On Windows, the Emscripten compiler is a batch script.
+                let (requested, note) = if self.cpp {
+                    ("em++", "Emscripten C++")
+                } else {
+                    ("emcc", "Emscripten C")
+                };
+                self.new_compiler(self.build_exe_or_bat(requested, note).exe()?)
+            });
+        }
+
+        // Windows
+        if target.contains("windows") {
+            // MSVC
+            if target.contains("msvc") {
+                assert!(!self.cuda, "MSVC with CUDA is not currently supported. Contributions welcome!");
+
+                // Get `Tool` for `cl.exe` from the Windows Registry. We put it behind a closure to
+                // avoid running it if it's not needed.
+                let tool_from_registry = || windows_registry::find_tool(&target, "cl.exe");
+
+                let tool = match tool {
+                    Some(mut tool) => {
+                        // We're using a tool from a source other than the Windows Registry, and it
+                        // could be `clang-cl.exe`. If no env vars are set, we should set them.
+                        //
+                        // Env vars are needed for finding `link.exe` in the `PATH`, include paths,
+                        // etc.. These paths are included by `windows_registry::find_tool` but not
+                        // necessarily by other approaches (such as the `CC` or `CXX` env vars).
+                        //
+                        // Setting up the environment ensures that we get a "works out of the box"
+                        // experience.
+                        if tool.family == (ToolFamily::Msvc { clang_cl: true }) && tool.env.len() == 0 {
+                            if let Some(registry_tool) = tool_from_registry() {
+                                for (k, v) in registry_tool.env {
+                                    tool.env.push((k.to_owned(), v.to_owned()));
+                                }
+                            }
+                        }
+                        Ok(tool)
+                    }
+                    None => {
+                        tool_from_registry()
+                            .ok_or_else(|| Error::new(ErrorKind::ToolNotFound, &format!("No tool found for target ({})", target)))
+                            // FIXME: `windows_registry::find_tool` does not properly create a
+                            // `Tool` for a compiler. Most importantly, it does not set the
+                            // `ToolFamily`.
+                            .and_then(|t| t.to_compiler(self.get_out_dir()?, false))
+                    }
+                };
+                return tool;
+            }
+
+            // MinGW
+            if target.contains("gnu") {
+                assert!(!self.cuda, "MinGW with CUDA is not currently supported. Contributions welcome!");
+                return self.new_compiler(self.build_exe(gnu, "MinGW default").exe()?);
+
+            }
+
+            // Unknown Windows target
+            return Err(Error::new(ErrorKind::ArchitectureInvalid,
+                                  &format!("Unknown target: {}", target)));
+        }
+
+        // We have now ruled out Windows as a target. From here, we can ignore Windows.
+
+        // This wrapper takes an `Executable` and builds a compiler `Tool` from it. If we need
+        // CUDA, it builds the appropriate `Tool` using the `Executable` path.
+        fn to_compiler(cfg: &Build, target: &str, exe: Executable) -> Result<Tool, Error> {
+            if cfg.cuda {
+                let mut tool = cfg.get_var("NVCC")
+                    .and_then(|s| cfg.build_exe(s, "$NVCC").exe())
+                    .or_else(|_| cfg.build_exe("nvcc", "Nvidia CUDA Compiler").exe())
+                    .map_err(|_| Error::new(ErrorKind::ToolNotFound, &format!("CUDA compiler not found (target: {})", target)))
+                    .and_then(|exe| cfg.new_compiler(exe))?;
+                tool.args
+                    .push(format!("-ccbin={}", exe.path().display()).into());
+                Ok(tool)
+            } else {
+                cfg.new_compiler(exe)
+            }
+        };
+        let to_compiler = |exe| to_compiler(self, &target, exe);
+
+        // Let's discharge the responsibility of keeping track of the `tool` from the env var.
+        if let Some(tool) = tool {
+            if self.cuda {
+                assert!(tool.args.is_empty() && tool.env.is_empty(), "For CUDA, we currently assume no arguments or env vars. Contributions welcome!");
+                return to_compiler(tool.exe);
+            } else {
+                return Ok(tool);
             }
         }
 
-        Ok(tool)
+        // From here, we don't use the above `tool`. We only want a default `Executable`.
+
+        // Android
+        if target.contains("android") {
+            let target = target
+                .replace("armv7neon", "arm")
+                .replace("armv7", "arm")
+                .replace("thumbv7neon", "arm")
+                .replace("thumbv7", "arm");
+            let note = "Android default";
+
+            // First try gnu and then clang.
+            return self.build_exe(format!("{}-{}", target, gnu), note).exe()
+                .or_else(|_| self.build_exe(format!("{}-{}", target, clang), note).exe())
+                .map_err(|_| Error::new(ErrorKind::ToolNotFound, &format!("Android compiler not found (target: {})", target)))
+                .and_then(to_compiler)
+        }
+
+        // CloudABI
+        if target.contains("cloudabi") {
+            return self.build_exe(format!("{}-{}", target, traditional), "CloudABI default").exe().and_then(to_compiler);
+        }
+
+        // WASM/WASI
+        if target == "wasm32-wasi" || target == "wasm32-unknown-wasi" || target == "wasm32-unknown-unknown" {
+            // FIXME: Should this be `clang` instead of `"clang"`? If not, add comment why.
+            return self.build_exe("clang", "WASM/WASI default").exe().and_then(to_compiler);
+        }
+
+        // VxWorks
+        if target.contains("vxworks") {
+            return self.build_exe("vx-cxx", "VxWorks C/C++ default").exe().and_then(to_compiler);
+        }
+
+        // We're approaching the end!
+
+        // Cross-compiling
+        if host != target {
+            // CROSS_COMPILE is of the form: "arm-linux-gnueabi-"
+            let cross_compile = self.getenv("CROSS_COMPILE");
+            let cross_compile = cross_compile
+                .as_ref()
+                .map(|s| s.trim_right_matches('-'))
+                .or(match &target[..] {
+                    "aarch64-unknown-linux-gnu" => Some("aarch64-linux-gnu"),
+                    "aarch64-unknown-linux-musl" => Some("aarch64-linux-musl"),
+                    "aarch64-unknown-netbsd" => Some("aarch64--netbsd"),
+                    "arm-unknown-linux-gnueabi" => Some("arm-linux-gnueabi"),
+                    "armv4t-unknown-linux-gnueabi" => Some("arm-linux-gnueabi"),
+                    "armv5te-unknown-linux-gnueabi" => Some("arm-linux-gnueabi"),
+                    "arm-frc-linux-gnueabi" => Some("arm-frc-linux-gnueabi"),
+                    "arm-unknown-linux-gnueabihf" => Some("arm-linux-gnueabihf"),
+                    "arm-unknown-linux-musleabi" => Some("arm-linux-musleabi"),
+                    "arm-unknown-linux-musleabihf" => Some("arm-linux-musleabihf"),
+                    "arm-unknown-netbsd-eabi" => Some("arm--netbsdelf-eabi"),
+                    "armv6-unknown-netbsd-eabihf" => Some("armv6--netbsdelf-eabihf"),
+                    "armv7-unknown-linux-gnueabihf" => Some("arm-linux-gnueabihf"),
+                    "armv7-unknown-linux-musleabihf" => Some("arm-linux-musleabihf"),
+                    "armv7neon-unknown-linux-gnueabihf" => Some("arm-linux-gnueabihf"),
+                    "armv7neon-unknown-linux-musleabihf" => Some("arm-linux-musleabihf"),
+                    "thumbv7-unknown-linux-gnueabihf" => Some("arm-linux-gnueabihf"),
+                    "thumbv7-unknown-linux-musleabihf" => Some("arm-linux-musleabihf"),
+                    "thumbv7neon-unknown-linux-gnueabihf" => Some("arm-linux-gnueabihf"),
+                    "thumbv7neon-unknown-linux-musleabihf" => Some("arm-linux-musleabihf"),
+                    "armv7-unknown-netbsd-eabihf" => Some("armv7--netbsdelf-eabihf"),
+                    "i586-unknown-linux-musl" => Some("musl"),
+                    "i686-pc-windows-gnu" => Some("i686-w64-mingw32"),
+                    "i686-uwp-windows-gnu" => Some("i686-w64-mingw32"),
+                    "i686-unknown-linux-musl" => Some("musl"),
+                    "i686-unknown-netbsd" => Some("i486--netbsdelf"),
+                    "mips-unknown-linux-gnu" => Some("mips-linux-gnu"),
+                    "mipsel-unknown-linux-gnu" => Some("mipsel-linux-gnu"),
+                    "mips64-unknown-linux-gnuabi64" => Some("mips64-linux-gnuabi64"),
+                    "mips64el-unknown-linux-gnuabi64" => Some("mips64el-linux-gnuabi64"),
+                    "mipsisa32r6-unknown-linux-gnu" => Some("mipsisa32r6-linux-gnu"),
+                    "mipsisa32r6el-unknown-linux-gnu" => Some("mipsisa32r6el-linux-gnu"),
+                    "mipsisa64r6-unknown-linux-gnuabi64" => Some("mipsisa64r6-linux-gnuabi64"),
+                    "mipsisa64r6el-unknown-linux-gnuabi64" => Some("mipsisa64r6el-linux-gnuabi64"),
+                    "powerpc-unknown-linux-gnu" => Some("powerpc-linux-gnu"),
+                    "powerpc-unknown-linux-gnuspe" => Some("powerpc-linux-gnuspe"),
+                    "powerpc-unknown-netbsd" => Some("powerpc--netbsd"),
+                    "powerpc64-unknown-linux-gnu" => Some("powerpc-linux-gnu"),
+                    "powerpc64le-unknown-linux-gnu" => Some("powerpc64le-linux-gnu"),
+                    "s390x-unknown-linux-gnu" => Some("s390x-linux-gnu"),
+                    "sparc-unknown-linux-gnu" => Some("sparc-linux-gnu"),
+                    "sparc64-unknown-linux-gnu" => Some("sparc64-linux-gnu"),
+                    "sparc64-unknown-netbsd" => Some("sparc64--netbsd"),
+                    "sparcv9-sun-solaris" => Some("sparcv9-sun-solaris"),
+                    "armebv7r-none-eabi" => Some("arm-none-eabi"),
+                    "armebv7r-none-eabihf" => Some("arm-none-eabi"),
+                    "armv7r-none-eabi" => Some("arm-none-eabi"),
+                    "armv7r-none-eabihf" => Some("arm-none-eabi"),
+                    "thumbv6m-none-eabi" => Some("arm-none-eabi"),
+                    "thumbv7em-none-eabi" => Some("arm-none-eabi"),
+                    "thumbv7em-none-eabihf" => Some("arm-none-eabi"),
+                    "thumbv7m-none-eabi" => Some("arm-none-eabi"),
+                    "thumbv8m.base-none-eabi" => Some("arm-none-eabi"),
+                    "thumbv8m.main-none-eabi" => Some("arm-none-eabi"),
+                    "thumbv8m.main-none-eabihf" => Some("arm-none-eabi"),
+                    "x86_64-pc-windows-gnu" => Some("x86_64-w64-mingw32"),
+                    "x86_64-uwp-windows-gnu" => Some("x86_64-w64-mingw32"),
+                    "x86_64-rumprun-netbsd" => Some("x86_64-rumprun-netbsd"),
+                    "x86_64-unknown-linux-musl" => Some("musl"),
+                    "x86_64-unknown-netbsd" => Some("x86_64--netbsd"),
+                    _ => None,
+                });
+            if let Some(prefix) = cross_compile {
+                return self.build_exe(format!("{}-{}", prefix, gnu), "Cross-compiling default").exe().and_then(to_compiler);
+            }
+        }
+
+        // On Solaris, the `traditional` options (`cc`/`c++`) are unlikely to exist or be correct,
+        // so we use `gnu` instead.
+        if host.contains("solaris") {
+            return self.build_exe(gnu, "Solaris default").exe().and_then(to_compiler);
+        }
+
+        // This is the end.
+        return self.build_exe(traditional, "Default").exe().and_then(to_compiler);
     }
 
     fn get_var(&self, var_base: &str) -> Result<String, Error> {
@@ -1919,17 +2038,24 @@ impl Build {
     }
 
     /// Returns compiler path, optional modifier name from whitelist, and arguments vec
-    fn env_tool(&self, name: &str) -> Option<(String, Option<String>, Vec<String>)> {
-        let tool = match self.get_var(name) {
-            Ok(tool) => tool,
+    fn env_tool(&self, var_name: &str) -> Option<(Executable, Option<Executable>, Vec<String>)> {
+        let var_value = match self.get_var(var_name) {
+            Ok(var_value) => var_value,
             Err(_) => return None,
         };
+
+        // Format this as a variable for the `Executable` note.
+        let var_name: &str = &format!("${}", var_name);
+
+        // Trim whitespace that can be found in Makefiles or configure scripts which are more
+        // lenient about it.
+        let var_value = var_value.trim();
 
         // If this is an exact path on the filesystem we don't want to do any
         // interpretation at all, just pass it on through. This'll hopefully get
         // us to support spaces-in-paths.
-        if Path::new(&tool).exists() {
-            return Some((tool, None, Vec::new()));
+        if let Ok(exe) = self.build_exe(var_value, var_name).exe() {
+            return Some((exe, None, Vec::new()));
         }
 
         // Ok now we want to handle a couple of scenarios. We'll assume from
@@ -1954,29 +2080,38 @@ impl Build {
         // you're not literally make or bash then you get a lot of bug reports.
         let known_wrappers = ["ccache", "distcc", "sccache", "icecc"];
 
-        let mut parts = tool.split_whitespace();
-        let maybe_wrapper = match parts.next() {
+        let mut parts = var_value.split_whitespace();
+
+        // The first part is either a wrapper or a compiler, but we don't know which, yet.
+        let first_part = match parts.next() {
             Some(s) => s,
             None => return None,
         };
+        let first_part_exe = match self.build_exe(first_part, format!("{}=\"{}\"", var_name, var_value)).exe() {
+            Ok(exe) => exe,
+            Err(_) => return None,
+        };
 
-        let file_stem = Path::new(maybe_wrapper)
+        let file_stem = Path::new(first_part)
             .file_stem()
             .unwrap()
             .to_str()
             .unwrap();
         if known_wrappers.contains(&file_stem) {
-            if let Some(compiler) = parts.next() {
-                return Some((
-                    compiler.to_string(),
-                    Some(maybe_wrapper.to_string()),
-                    parts.map(|s| s.to_string()).collect(),
-                ));
+            if let Some(name) = parts.next() {
+                // Ensure the second part is an executable.
+                if let Ok(compiler_exe) = self.build_exe(name, var_name).exe() {
+                    return Some((
+                            compiler_exe,
+                            Some(first_part_exe),
+                            parts.map(|s| s.to_string()).collect(),
+                            ));
+                }
             }
         }
 
         Some((
-            maybe_wrapper.to_string(),
+            first_part_exe,
             None,
             parts.map(|s| s.to_string()).collect(),
         ))
@@ -2012,35 +2147,44 @@ impl Build {
         }
     }
 
-    fn get_ar(&self) -> Result<(Command, String), Error> {
-        if let Some(ref p) = self.archiver {
-            let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("ar");
-            return Ok((self.cmd(p), name.to_string()));
+    /// This function includes all of the underlying logic to find the archiver.
+    ///
+    /// The approach is to discharge the required conditions and `return` as soon as they are
+    /// fulfilled. This allows us to keep the flow simple by avoiding `else` and reducing the
+    /// number of conditions to consider as you read further.
+    fn get_ar(&self) -> Result<Executable, Error> {
+        // First, if the user provided an archiver path, use that.
+        if let Some(path) = &self.archiver {
+            return self.build_exe(path, "User-provided archiver").exe();
         }
-        if let Ok(p) = self.get_var("AR") {
-            return Ok((self.cmd(&p), p));
-        }
-        let target = self.get_target()?;
-        let program = if target.contains("android") {
-            format!("{}-ar", target.replace("armv7", "arm"))
-        } else if target.contains("emscripten") {
-            // Windows use bat files so we have to be a bit more specific
-            if cfg!(windows) {
-                let mut cmd = self.cmd("cmd");
-                cmd.arg("/c").arg("emar.bat");
-                return Ok((cmd, "emar.bat".to_string()));
-            }
 
-            "emar".to_string()
-        } else if target.contains("msvc") {
-            match windows_registry::find(&target, "lib.exe") {
-                Some(t) => return Ok((t, "lib.exe".to_string())),
-                None => "lib.exe".to_string(),
+        // Then, the priority goes to the environment variable (`AR`).
+        if let Ok(path) = self.get_var("AR") {
+            return self.build_exe(path, "$AR").exe();
+        }
+
+        let target = self.get_target()?;
+
+        // Next, we look at target defaults.
+
+        if target.contains("emscripten") {
+            // On Windows, the Emscripten archiver is a batch script.
+            return self.build_exe_or_bat("emar", "Emscripten archiver").exe()
+        }
+
+        if target.contains("msvc") {
+            match windows_registry::find_tool(&target, "lib.exe") {
+                Some(tool) => return Ok(tool.exe),
+                None => return self.build_exe("lib.exe", "MSVC default archiver").exe(),
             }
-        } else {
-            "ar".to_string()
-        };
-        Ok((self.cmd(&program), program))
+        }
+
+        if target.contains("android") {
+            return self.build_exe(format!("{}-ar", target.replace("armv7", "arm")), "Android default archiver").exe();
+        }
+
+        // This is the end.
+        return self.build_exe("ar", "Default archiver").exe();
     }
 
     fn get_target(&self) -> Result<String, Error> {
@@ -2109,6 +2253,45 @@ impl Build {
             println!("{}", s);
         }
     }
+
+    /// Get an `Executable` builder.
+    fn build_exe<T, U>(&self, requested: T, note: U) -> executable::Build
+    where
+        T: Into<OsString>,
+        U: Into<String>,
+    {
+        let mut cfg = executable::Build::new(requested, note);
+        cfg.envs(&self.env);
+        cfg
+    }
+
+    /// Create an `Executable` for a command name that is a batch script on Windows.
+    #[cfg(not(windows))]
+    fn build_exe_or_bat<T, U>(&self, requested: T, note: U) -> executable::Build
+    where
+        T: Into<String>,
+        U: Into<String>,
+    {
+        self.build_exe(requested.into(), note)
+    }
+
+    /// Create an `Executable` for a command name that is a batch script on Windows.
+    #[cfg(windows)]
+    fn build_exe_or_bat<T, U>(&self, requested: T, note: U) -> executable::Build
+    where
+        T: Into<String>,
+        U: Into<String>,
+    {
+        // Use `cmd` to run the batch file.
+        let mut cfg = self.build_exe("cmd", note);
+        cfg.arg("/c").arg(self.build_exe(format!("{}.bat", requested.into()), note).path()?);
+        cfg
+    }
+
+    /// Create a compiler `Tool` from an `Executable`.
+    fn new_compiler(&self, exe: Executable) -> Result<Tool, Error> {
+        Tool::compiler(exe, self.get_out_dir()?, self.cuda)
+    }
 }
 
 impl Default for Build {
@@ -2118,39 +2301,39 @@ impl Default for Build {
 }
 
 impl Tool {
-    fn new(path: PathBuf) -> Tool {
-        Tool::with_features(path, false)
-    }
 
-    fn with_features(path: PathBuf, cuda: bool) -> Tool {
-        // Try to detect family of the tool from its name, falling back to Gnu.
-        let family = if let Some(fname) = path.file_name().and_then(|p| p.to_str()) {
-            if fname.contains("clang-cl") {
-                ToolFamily::Msvc { clang_cl: true }
-            } else if fname.contains("cl")
-                && !fname.contains("cloudabi")
-                && !fname.contains("uclibc")
-                && !fname.contains("clang")
-            {
-                ToolFamily::Msvc { clang_cl: false }
-            } else if fname.contains("clang") {
-                ToolFamily::Clang
-            } else {
-                ToolFamily::Gnu
-            }
-        } else {
-            ToolFamily::Gnu
-        };
+    /// Returns a generic (i.e. non-compiler) `Tool`. The `ToolFamily` is not detected.
+    ///
+    /// FIXME: Currently, `Tool` is used for all kinds of executables. There should probably be
+    /// different types for different kinds of executables, since they require different fields and
+    /// operations.
+    fn new(exe: Executable) -> Tool
+    where
+        {
         Tool {
-            path: path,
+            exe,
             cc_wrapper_path: None,
             cc_wrapper_args: Vec::new(),
             args: Vec::new(),
             env: Vec::new(),
-            family: family,
-            cuda: cuda,
+            family: ToolFamily::Gnu,
+            cuda: false,
             removed_args: Vec::new(),
         }
+    }
+
+    /// Returns a `Tool` for a compiler after detecting the `ToolFamily`.
+    fn compiler<P: AsRef<Path>>(exe: Executable, out_dir: P, cuda: bool) -> Result<Tool, Error> {
+        Tool::new(exe).to_compiler(out_dir, cuda)
+    }
+
+    /// Upgrades a `Tool` into a compiler by detecting the `ToolFamily` and setting the `cuda`
+    /// field.
+    fn to_compiler<P: AsRef<Path>>(mut self, out_dir: P, cuda: bool) -> Result<Tool, Error> {
+        let family = ToolFamily::detect(out_dir, &self.exe)?;
+        self.family = family;
+        self.cuda = cuda;
+        Ok(self)
     }
 
     /// Add an argument to be stripped from the final command arguments.
@@ -2214,11 +2397,11 @@ impl Tool {
     pub fn to_command(&self) -> Command {
         let mut cmd = match self.cc_wrapper_path {
             Some(ref cc_wrapper_path) => {
-                let mut cmd = Command::new(&cc_wrapper_path);
-                cmd.arg(&self.path);
+                let mut cmd = cc_wrapper_path.to_command();
+                cmd.arg(&self.path());
                 cmd
             }
-            None => Command::new(&self.path),
+            None => self.exe.to_command()
         };
         cmd.args(&self.cc_wrapper_args);
 
@@ -2235,12 +2418,12 @@ impl Tool {
         cmd
     }
 
-    /// Returns the path for this compiler.
+    /// Returns the path for this `Tool`.
     ///
-    /// Note that this may not be a path to a file on the filesystem, e.g. "cc",
-    /// but rather something which will be resolved when a process is spawned.
+    /// WARNING! This is not necessarily the path of a compiler or other tool. In some cases, it
+    /// may be `sh` or `cmd.exe`. It depends on how the `Tool` was constructed.
     pub fn path(&self) -> &Path {
-        &self.path
+        &self.exe.path()
     }
 
     /// Returns the default set of arguments to the compiler needed to produce
@@ -2264,9 +2447,9 @@ impl Tool {
     pub fn cc_env(&self) -> OsString {
         match self.cc_wrapper_path {
             Some(ref cc_wrapper_path) => {
-                let mut cc_env = cc_wrapper_path.as_os_str().to_owned();
+                let mut cc_env = cc_wrapper_path.path().as_os_str().to_owned();
                 cc_env.push(" ");
-                cc_env.push(self.path.to_path_buf().into_os_string());
+                cc_env.push(self.path().to_path_buf().into_os_string());
                 for arg in self.cc_wrapper_args.iter() {
                     cc_env.push(" ");
                     cc_env.push(arg);
@@ -2419,6 +2602,18 @@ fn spawn(cmd: &mut Command, program: &str) -> Result<(Child, JoinHandle<()>), Er
 fn fail(s: &str) -> ! {
     let _ = writeln!(io::stderr(), "\n\nerror occurred: {}\n\n", s);
     std::process::exit(1);
+}
+
+fn ensure_source_file<P, S>(dir: P, name: S, content: &[u8]) -> Result<PathBuf, Error>
+where
+P: AsRef<Path>,
+S: AsRef<str>,
+{
+    let file = dir.as_ref().join(Path::new(name.as_ref()));
+    if !file.exists() {
+        fs::File::create(&file)?.write_all(content)?;
+    }
+    Ok(file)
 }
 
 fn command_add_output_file(cmd: &mut Command, dst: &Path, msvc: bool, is_asm: bool, is_arm: bool) {

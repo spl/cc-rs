@@ -250,7 +250,7 @@ fn gnu_flag_if_supported() {
         .flag_if_supported("-std=c++11")
         .compile("foo");
 
-    test.cmd(0)
+    test.cmd(3)
         .must_have("-v")
         .must_have("-Wall")
         .must_not_have("-Wflag-does-not-exist")
@@ -269,7 +269,7 @@ fn gnu_flag_if_supported_cpp() {
         .flag_if_supported("-std=c++11")
         .compile("foo");
 
-    test.cmd(0).must_have("-std=c++11");
+    test.cmd(1).must_have("-std=c++11");
 }
 
 #[test]

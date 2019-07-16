@@ -7,7 +7,15 @@ use std::path::{Path, PathBuf};
 
 fn main() {
     let mut args = env::args();
+
+    // Get the program file stem.
     let program = args.next().expect("Unexpected empty args");
+    let program = &Path::new(&program)
+        .file_stem()
+        .expect(&format!("{}: no file stem", program))
+        .to_string_lossy()
+        .into_owned();
+
     let args: Vec<_> = args.collect();
 
     // Handle special cases:
@@ -15,10 +23,7 @@ fn main() {
         // No arguments. Assume this is a spawn test and don't do anything.
         [] => return,
         // The arguments indicate a `ToolFamily::detect`. Print the expected `ToolFamily` string.
-        [_, a2] if a2.contains("cc_rs_tool_family") => {
-            let program = Path::new(&program)
-                .file_stem()
-                .expect(&format!("{}: no file stem", program));
+        [_, a2] if a2.ends_with("cc_rs_tool_family.h") => {
             let _ = if program == "cl" {
                 std::io::stdout().write_all(b"msvc")
             } else {
@@ -49,6 +54,12 @@ fn main() {
             candidate.to_string_lossy()
         ));
         for arg in args {
+            // Tests for flag_if_supported
+            if !program.ends_with("++") {
+                exit_if_eq(program, &arg, "-std=c++11");
+            }
+            exit_if_eq(program, &arg, "-Wflag-does-not-exist");
+
             writeln!(f, "{}", arg).expect(&format!(
                 "{}: can't write to candidate: {}",
                 program,
@@ -65,4 +76,21 @@ fn main() {
         program,
         path.to_string_lossy()
     ));
+}
+
+/// Report the flag to `stderr` and exit.
+fn exit_if_eq<S, T, U>(program: S, arg: T, flag: U)
+where
+    S: AsRef<str>,
+    T: AsRef<str>,
+    U: AsRef<str>,
+{
+    if arg.as_ref() == flag.as_ref() {
+        eprintln!(
+            "{}: flag '{}' not supported",
+            program.as_ref(),
+            flag.as_ref()
+        );
+        std::process::exit(0);
+    }
 }
