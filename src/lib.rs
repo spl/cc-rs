@@ -514,7 +514,7 @@ impl Build {
         let src = self.ensure_check_file()?;
         let obj = out_dir.join("flag_check");
         let target = self.get_target()?;
-        let mut compiler = self.clone_for_flag_check().try_get_compiler()?;
+        let mut compiler = self.clone_for_flag_check().flag(flag).try_get_compiler()?;
 
         // Clang uses stderr for verbose output, which yields a false positive
         // result if the CFLAGS/CXXFLAGS include -v to aid in debugging.
