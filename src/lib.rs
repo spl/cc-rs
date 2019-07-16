@@ -1793,13 +1793,13 @@ impl Build {
         if target.contains("emscripten") {
             assert!(!self.cuda, "Emscripten with CUDA is not currently supported. Contributions welcome!");
             return tool.map(Result::Ok).unwrap_or_else(|| {
-                // On Windows, the Emscripten compiler is a batch script.
                 let (requested, note) = if self.cpp {
                     ("em++", "Emscripten C++")
                 } else {
                     ("emcc", "Emscripten C")
                 };
-                self.new_compiler(self.build_exe_or_bat(requested, note).exe()?)
+                // On Windows, the Emscripten compiler is a batch script.
+                self.new_compiler(self.exe_or_bat(requested, note)?)
             });
         }
 
@@ -2169,7 +2169,7 @@ impl Build {
 
         if target.contains("emscripten") {
             // On Windows, the Emscripten archiver is a batch script.
-            return self.build_exe_or_bat("emar", "Emscripten archiver").exe()
+            return self.exe_or_bat("emar", "Emscripten archiver")
         }
 
         if target.contains("msvc") {
@@ -2267,25 +2267,26 @@ impl Build {
 
     /// Create an `Executable` for a command name that is a batch script on Windows.
     #[cfg(not(windows))]
-    fn build_exe_or_bat<T, U>(&self, requested: T, note: U) -> executable::Build
+    fn exe_or_bat<T, U>(&self, requested: T, note: U) -> Result<Executable, Error>
     where
         T: Into<String>,
         U: Into<String>,
     {
-        self.build_exe(requested.into(), note)
+        self.build_exe(requested.into(), note).exe()
     }
 
     /// Create an `Executable` for a command name that is a batch script on Windows.
     #[cfg(windows)]
-    fn build_exe_or_bat<T, U>(&self, requested: T, note: U) -> executable::Build
+    fn exe_or_bat<T, U>(&self, requested: T, note: U) -> Result<Executable, Error>
     where
         T: Into<String>,
         U: Into<String>,
     {
-        // Use `cmd` to run the batch file.
+        let note = note.into();
+        let bat = self.build_exe(format!("{}.bat", requested.into()), note.clone()).path()?;
         let mut cfg = self.build_exe("cmd", note);
-        cfg.arg("/c").arg(self.build_exe(format!("{}.bat", requested.into()), note).path()?);
-        cfg
+        cfg.arg("/c").arg(bat);
+        cfg.exe()
     }
 
     /// Create a compiler `Tool` from an `Executable`.
