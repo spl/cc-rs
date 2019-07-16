@@ -7,7 +7,7 @@ use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use which::CanonicalPath;
 
 /// A minimal representation of an executable such as a compiler, assembler, or other build tool.
@@ -233,12 +233,17 @@ impl Build {
             args: self.args,
             envs: self.envs,
         };
-        exe.to_command().spawn().map_err(|e| {
-            Error::new(
-                ToolNotFound,
-                &format!("{:?}: Can't spawn executable: {}", exe, e),
-            )
-        })?;
+        exe.to_command()
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| {
+                Error::new(
+                    ToolNotFound,
+                    &format!("{:?}: Can't spawn executable: {}", exe, e),
+                )
+            })?;
         Ok(exe)
     }
 }
