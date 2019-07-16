@@ -89,7 +89,6 @@ mod setup_config;
 pub mod windows_registry;
 
 mod executable;
-mod which2;
 
 use executable::Executable;
 

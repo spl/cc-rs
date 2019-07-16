@@ -8,7 +8,7 @@ use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use which2::CanonicalPath;
+use which::CanonicalPath;
 
 /// A minimal representation of an executable such as a compiler, assembler, or other build tool.
 ///

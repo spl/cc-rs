@@ -18,7 +18,8 @@ exclude = ["/.travis.yml", "/appveyor.yml"]
 
 [dependencies]
 rayon = { version = "1.0", optional = true }
-which = { path = "../which-rs", version = "2.0" }
+which = { git = "https://github.com/spl/which-rs", branch = "path-struct" }
+
 
 [features]
 parallel = ["rayon"]
