@@ -8,7 +8,7 @@ use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use which::CanonicalPath;
+use which;
 
 /// A minimal representation of an executable such as a compiler, assembler, or other build tool.
 ///
@@ -33,7 +33,7 @@ pub struct Executable {
     requested: OsString,
 
     /// Verified canonical path of the executable.
-    path: CanonicalPath,
+    path: PathBuf,
 
     /// Note with extra information about the source of the `path`.
     ///
@@ -113,8 +113,8 @@ impl Executable {
     }
 }
 
-/// A builder for either an `Executable` using `Build::exe` or a `CanonicalPath` of an executable
-/// using `Build::path`.
+/// A builder for either an `Executable` using `Build::exe` or a `PathBuf` of an executable using
+/// `Build::path`.
 #[derive(Clone, Debug)]
 pub struct Build {
     requested: OsString,
@@ -181,7 +181,7 @@ impl Build {
         self
     }
 
-    fn take_path(&mut self) -> Result<CanonicalPath, Error> {
+    fn take_path(&mut self) -> Result<PathBuf, Error> {
         // Get the search paths by first checking the environment variables for an optional
         // explicit use of `PATH` and then checking the environment itself.
         let paths: Option<OsString> = self
@@ -204,24 +204,79 @@ impl Build {
                 )
             })?;
 
-        // Find the verified canonical path of the requested executable.
-        CanonicalPath::new_in(&self.requested, paths.as_ref(), &current_dir).map_err(|e| {
+        // Find the path of the requested executable.
+        //
+        // This confirms that we're working with an actual executable in the search path.
+        let path = which::which_in(&self.requested, paths.as_ref(), &current_dir).map_err(|e| {
             Error::new(
                 ToolNotFound,
                 &format!(
-                    "{:?} (paths: {:?}, current_dir: {:?}): Can't find canonical path: {}",
+                    "{:?} (paths: {:?}, current_dir: {:?}): Can't find path of executable: {}",
                     self.requested, paths, current_dir, e
                 ),
             )
+        })?;
+
+        // Find the canonical path of the executable.
+        //
+        // This gives the absolute path with all symbolic links and relative paths resolved. It
+        // is useful for identifying the executable used when debugging problems with compilation.
+        let path = path.canonicalize().map_err(|e| {
+            Error::new(
+                ToolNotFound,
+                &format!(
+                    "{:?} (path: {:?}): Can't find canonical path: {}",
+                    self.requested, path, e
+                ),
+            )
+        })?;
+
+        Ok(if cfg!(windows) {
+            // This is an attempt to remove the leading "\\?\" from file paths with the Windows NT
+            // universal naming convention (a.k.a. UNC or extended-length paths) produced by
+            // `std::fs::canonicalize`. Such paths are not accepted by many Windows programs
+            // (including MinGW `gcc` and some versions of MSVC `cl.exe`).
+            //
+            // Reference: <https://docs.microsoft.com/en-us/windows/win32/fileio/naming-a-file>
+            //
+            // Note that this does not fail. If the string cannot be converted to Unicode or the
+            // prefix is not found, the original path is used.
+            //
+            // If better conversion is desired, consider <https://crates.io/crates/dunce>.
+
+            /*
+            match path.clone().to_str() {
+                Some(s) if s.starts_with(r"\\?\") => match s.get(4..) {
+                    Some(s) => PathBuf::from(s),
+                    None => path,
+                },
+                _ => path,
+            }
+            */
+
+            /*
+            let mut path = path;
+            if let Some(s) = path.to_str() {
+                if s.starts_with(r"\\?\") {
+                    if let Some(s) = s.get(4..) {
+                        path = PathBuf::from(s.to_string());
+                    }
+                }
+            }
+            */
+
+            path.to_str().map(|s| s.get(4..)).and_then(|o| o).map(PathBuf::from).unwrap_or(path)
+        } else {
+            path
         })
     }
 
-    /// Convert the builder into a canonical path.
-    pub fn path(mut self) -> Result<CanonicalPath, Error> {
+    /// Convert the builder into a canonical path without performing a spawn test.
+    pub fn path(mut self) -> Result<PathBuf, Error> {
         self.take_path()
     }
 
-    /// Convert the builder into an executable.
+    /// Convert the builder into an executable after performing a spawn test.
     pub fn exe(mut self) -> Result<Executable, Error> {
         let path = self.take_path()?;
 
