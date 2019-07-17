@@ -258,8 +258,9 @@ impl ToolFamily {
         for flag in &["-E", "/E"] {
             // Feed the arguments to the compiler and collect the output.
             let mut cmd = exe.to_command();
+            cmd.stderr(Stdio::null()).arg(flag).arg(&input);
             eprintln!("### detect: cmd: {:?}", cmd);
-            let output = cmd.stderr(Stdio::null()).arg(flag).arg(&input).output()?;
+            let output = cmd.output()?;
 
             // Check if the compiler run failed.
             if !output.status.success() {
