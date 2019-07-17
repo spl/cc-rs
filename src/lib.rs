@@ -261,6 +261,7 @@ impl ToolFamily {
             cmd.stderr(Stdio::null()).arg(flag).arg(&input);
             eprintln!("### detect: cmd: {:?}", cmd);
             let output = cmd.output()?;
+            eprintln!("### detect: output: {:?}", output);
 
             // Check if the compiler run failed.
             if !output.status.success() {
