@@ -94,9 +94,21 @@ impl Test {
     }
 
     pub fn which<S: AsRef<OsStr>>(&self, name: S) -> PathBuf {
-        which::CanonicalPath::new_in(name, Some(self.td.path()), self.td.path())
+        let path = which::which_in(name, Some(self.td.path()), self.td.path())
             .unwrap()
-            .into_path_buf()
+            .canonicalize()
+            .unwrap();
+        if cfg!(windows) {
+            // This is an attempt to remove the leading "\\?\" from file paths with the Windows NT
+            // universal naming convention (a.k.a. UNC or extended-length paths).
+            path.to_str()
+                .map(|s| s.get(4..))
+                .and_then(|o| o)
+                .map(PathBuf::from)
+                .unwrap_or(path)
+        } else {
+            path
+        }
     }
 }
 

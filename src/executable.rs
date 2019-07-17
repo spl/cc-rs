@@ -221,7 +221,7 @@ impl Build {
         //
         // This gives the absolute path with all symbolic links and relative paths resolved. It
         // is useful for identifying the executable used when debugging problems with compilation.
-        let path = path.canonicalize().map_err(|e| {
+        canonicalize(&path).map_err(|e| {
             Error::new(
                 ToolNotFound,
                 &format!(
@@ -229,45 +229,6 @@ impl Build {
                     self.requested, path, e
                 ),
             )
-        })?;
-
-        Ok(if cfg!(windows) {
-            // This is an attempt to remove the leading "\\?\" from file paths with the Windows NT
-            // universal naming convention (a.k.a. UNC or extended-length paths) produced by
-            // `std::fs::canonicalize`. Such paths are not accepted by many Windows programs
-            // (including MinGW `gcc` and some versions of MSVC `cl.exe`).
-            //
-            // Reference: <https://docs.microsoft.com/en-us/windows/win32/fileio/naming-a-file>
-            //
-            // Note that this does not fail. If the string cannot be converted to Unicode or the
-            // prefix is not found, the original path is used.
-            //
-            // If better conversion is desired, consider <https://crates.io/crates/dunce>.
-
-            /*
-            match path.clone().to_str() {
-                Some(s) if s.starts_with(r"\\?\") => match s.get(4..) {
-                    Some(s) => PathBuf::from(s),
-                    None => path,
-                },
-                _ => path,
-            }
-            */
-
-            /*
-            let mut path = path;
-            if let Some(s) = path.to_str() {
-                if s.starts_with(r"\\?\") {
-                    if let Some(s) = s.get(4..) {
-                        path = PathBuf::from(s.to_string());
-                    }
-                }
-            }
-            */
-
-            path.to_str().map(|s| s.get(4..)).and_then(|o| o).map(PathBuf::from).unwrap_or(path)
-        } else {
-            path
         })
     }
 
@@ -301,4 +262,28 @@ impl Build {
             })?;
         Ok(exe)
     }
+}
+
+// This is an attempt to remove the leading "\\?\" from file paths with the Windows NT universal
+// naming convention (a.k.a. UNC or extended-length paths) produced by `std::fs::canonicalize`.
+// Such paths are not accepted by many Windows programs (including MinGW `gcc` and some versions of
+// MSVC `cl.exe`).
+//
+// Reference: <https://docs.microsoft.com/en-us/windows/win32/fileio/naming-a-file>
+//
+// Note that this does not fail. If the string cannot be converted to Unicode or the prefix is not
+// found, the original path is used.
+//
+// If better conversion is desired, consider <https://crates.io/crates/dunce>.
+fn canonicalize<P: AsRef<Path>>(path: P) -> Result<PathBuf, std::io::Error> {
+    let path = path.as_ref().canonicalize()?;
+    Ok(if cfg!(windows) {
+        path.to_str()
+            .map(|s| s.get(4..))
+            .and_then(|o| o)
+            .map(PathBuf::from)
+            .unwrap_or(path)
+    } else {
+        path
+    })
 }
