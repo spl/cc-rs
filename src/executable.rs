@@ -264,6 +264,74 @@ impl Build {
     }
 }
 
+/// A builder for an `Executable` using `Msvc::exe`.
+///
+/// This builder differs from `Build` by being specialized to the environment variables used by
+/// MSVC executables.
+#[derive(Clone, Debug)]
+pub struct Msvc {
+    requested: OsString,
+    note: String,
+    include_paths: Vec<PathBuf>,
+    lib_paths: Vec<PathBuf>,
+    path_paths: Vec<PathBuf>,
+}
+
+impl Msvc {
+    pub fn new<T, U>(requested: T, note: U) -> Self
+    where
+        T: Into<OsString>,
+        U: Into<String>,
+    {
+        Msvc {
+            requested: requested.into(),
+            note: note.into(),
+            include_paths: Vec::new(),
+            lib_paths: Vec::new(),
+            path_paths: Vec::new(),
+        }
+    }
+
+    pub fn include<P: Into<PathBuf>>(&mut self, path: P) -> &mut Self {
+        self.include_paths.push(path.into());
+        self
+    }
+
+    pub fn lib<P: Into<PathBuf>>(&mut self, path: P) -> &mut Self {
+        self.lib_paths.push(path.into());
+        self
+    }
+
+    pub fn path<P: Into<PathBuf>>(&mut self, path: P) -> &mut Self {
+        self.path_paths.push(path.into());
+        self
+    }
+
+    /// Convert the builder into an executable after performing a spawn test.
+    pub fn exe(self) -> Result<Executable, Error> {
+        let mut cfg = Build::new(self.requested, self.note);
+        Msvc::extend_paths(&mut cfg, "INCLUDE", self.include_paths);
+        Msvc::extend_paths(&mut cfg, "LIB", self.lib_paths);
+        Msvc::extend_paths(&mut cfg, "PATH", self.path_paths);
+        cfg.exe()
+    }
+
+    fn extend_paths<T>(cfg: &mut Build, var: T, paths: Vec<PathBuf>)
+    where
+        T: AsRef<OsStr>,
+    {
+        let var = var.as_ref();
+        let old_paths = env::var_os(var).unwrap_or(OsString::new());
+        let old_paths = env::split_paths(&old_paths);
+        let new_paths = paths.into_iter().chain(old_paths);
+        cfg.env(
+            var,
+            env::join_paths(new_paths)
+                .expect(&format!("Msvc::extend_paths: Unexpected path formats")),
+        );
+    }
+}
+
 // This is an attempt to remove the leading "\\?\" from file paths with the Windows NT universal
 // naming convention (a.k.a. UNC or extended-length paths) produced by `std::fs::canonicalize`.
 // Such paths are not accepted by many Windows programs (including MinGW `gcc` and some versions of

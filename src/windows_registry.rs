@@ -175,7 +175,6 @@ mod impl_ {
     use com;
     use registry::{RegistryKey, LOCAL_MACHINE};
     use setup_config::{EnumSetupInstances, SetupConfiguration, SetupInstance};
-    use std::env;
     use std::ffi::OsString;
     use std::fs::File;
     use std::io::Read;
@@ -183,40 +182,8 @@ mod impl_ {
     use std::iter;
     use std::path::{Path, PathBuf};
 
-    use executable::{self, Executable};
+    use executable::{self, Executable, Msvc};
     use Tool;
-
-    struct MsvcTool {
-        tool: Executable,
-        libs: Vec<PathBuf>,
-        path: Vec<PathBuf>,
-        include: Vec<PathBuf>,
-    }
-
-    impl MsvcTool {
-        fn new(tool: Executable) -> MsvcTool {
-            MsvcTool {
-                tool: tool,
-                libs: Vec::new(),
-                path: Vec::new(),
-                include: Vec::new(),
-            }
-        }
-
-        fn into_tool(self) -> Tool {
-            let MsvcTool {
-                tool,
-                libs,
-                path,
-                include,
-            } = self;
-            let mut tool = Tool::new(tool);
-            add_env(&mut tool, "LIB", libs);
-            add_env(&mut tool, "PATH", path);
-            add_env(&mut tool, "INCLUDE", include);
-            tool
-        }
-    }
 
     fn vs16_instances() -> Box<Iterator<Item=PathBuf>> {
         let instances = if let Some(instances) = vs15_instances() {
@@ -317,19 +284,19 @@ mod impl_ {
     fn tool_from_vs15_instance(tool: &str, target: &str, instance: &SetupInstance) -> Option<Tool> {
         let (bin_path, host_dylib_path, lib_path, include_path) =
             otry!(vs15_vc_paths(target, instance));
-        let mut tool = MsvcTool::new(try_exe(bin_path.join(tool), "VS 15")?);
-        tool.path.push(host_dylib_path);
-        tool.libs.push(lib_path);
-        tool.include.push(include_path);
+        let mut cfg = Msvc::new(bin_path.join(tool), "VS 15");
+        cfg.path(host_dylib_path);
+        cfg.lib(lib_path);
+        cfg.include(include_path);
 
         if let Some((atl_lib_path, atl_include_path)) = atl_paths(target, &bin_path) {
-            tool.libs.push(atl_lib_path);
-            tool.include.push(atl_include_path);
+            cfg.lib(atl_lib_path);
+            cfg.include(atl_include_path);
         }
 
-        otry!(add_sdks(&mut tool, target));
+        otry!(add_sdks(&mut cfg, target));
 
-        Some(tool.into_tool())
+        cfg.exe().map(Tool::new).ok()
     }
 
     fn vs15_vc_paths(
@@ -383,41 +350,40 @@ mod impl_ {
     // the Windows 10 SDK or Windows 8.1 SDK.
     pub fn find_msvc_14(tool: &str, target: &str) -> Option<Tool> {
         let vcdir = otry!(get_vc_dir("14.0"));
-        let mut tool = otry!(get_tool(tool, &vcdir, target, "MSVC 14"));
-        otry!(add_sdks(&mut tool, target));
-        Some(tool.into_tool())
+        let mut cfg = otry!(get_tool(tool, &vcdir, target, "MSVC 14"));
+        otry!(add_sdks(&mut cfg, target));
+        cfg.exe().ok().map(Tool::new)
     }
 
-    fn add_sdks(tool: &mut MsvcTool, target: &str) -> Option<()> {
+    fn add_sdks(cfg: &mut Msvc, target: &str) -> Option<()> {
         let sub = otry!(lib_subdir(target));
         let (ucrt, ucrt_version) = otry!(get_ucrt_dir());
 
-        tool.path
-            .push(ucrt.join("bin").join(&ucrt_version).join(sub));
+        cfg.path(ucrt.join("bin").join(&ucrt_version).join(sub));
 
         let ucrt_include = ucrt.join("include").join(&ucrt_version);
-        tool.include.push(ucrt_include.join("ucrt"));
+        cfg.include(ucrt_include.join("ucrt"));
 
         let ucrt_lib = ucrt.join("lib").join(&ucrt_version);
-        tool.libs.push(ucrt_lib.join("ucrt").join(sub));
+        cfg.lib(ucrt_lib.join("ucrt").join(sub));
 
         if let Some((sdk, version)) = get_sdk10_dir() {
-            tool.path.push(sdk.join("bin").join(sub));
+            cfg.path(sdk.join("bin").join(sub));
             let sdk_lib = sdk.join("lib").join(&version);
-            tool.libs.push(sdk_lib.join("um").join(sub));
+            cfg.lib(sdk_lib.join("um").join(sub));
             let sdk_include = sdk.join("include").join(&version);
-            tool.include.push(sdk_include.join("um"));
-            tool.include.push(sdk_include.join("cppwinrt"));
-            tool.include.push(sdk_include.join("winrt"));
-            tool.include.push(sdk_include.join("shared"));
+            cfg.include(sdk_include.join("um"));
+            cfg.include(sdk_include.join("cppwinrt"));
+            cfg.include(sdk_include.join("winrt"));
+            cfg.include(sdk_include.join("shared"));
         } else if let Some(sdk) = get_sdk81_dir() {
-            tool.path.push(sdk.join("bin").join(sub));
+            cfg.path(sdk.join("bin").join(sub));
             let sdk_lib = sdk.join("lib").join("winv6.3");
-            tool.libs.push(sdk_lib.join("um").join(sub));
+            cfg.lib(sdk_lib.join("um").join(sub));
             let sdk_include = sdk.join("include");
-            tool.include.push(sdk_include.join("um"));
-            tool.include.push(sdk_include.join("winrt"));
-            tool.include.push(sdk_include.join("shared"));
+            cfg.include(sdk_include.join("um"));
+            cfg.include(sdk_include.join("winrt"));
+            cfg.include(sdk_include.join("shared"));
         }
 
         Some(())
@@ -426,46 +392,38 @@ mod impl_ {
     // For MSVC 12 we need to find the Windows 8.1 SDK.
     pub fn find_msvc_12(tool: &str, target: &str) -> Option<Tool> {
         let vcdir = otry!(get_vc_dir("12.0"));
-        let mut tool = otry!(get_tool(tool, &vcdir, target, "MSVC 12"));
+        let mut cfg = otry!(get_tool(tool, &vcdir, target, "MSVC 12"));
         let sub = otry!(lib_subdir(target));
         let sdk81 = otry!(get_sdk81_dir());
-        tool.path.push(sdk81.join("bin").join(sub));
+        cfg.path(sdk81.join("bin").join(sub));
         let sdk_lib = sdk81.join("lib").join("winv6.3");
-        tool.libs.push(sdk_lib.join("um").join(sub));
+        cfg.lib(sdk_lib.join("um").join(sub));
         let sdk_include = sdk81.join("include");
-        tool.include.push(sdk_include.join("shared"));
-        tool.include.push(sdk_include.join("um"));
-        tool.include.push(sdk_include.join("winrt"));
-        Some(tool.into_tool())
+        cfg.include(sdk_include.join("shared"));
+        cfg.include(sdk_include.join("um"));
+        cfg.include(sdk_include.join("winrt"));
+        cfg.exe().map(Tool::new).ok()
     }
 
     // For MSVC 11 we need to find the Windows 8 SDK.
     pub fn find_msvc_11(tool: &str, target: &str) -> Option<Tool> {
         let vcdir = otry!(get_vc_dir("11.0"));
-        let mut tool = otry!(get_tool(tool, &vcdir, target, "MSVC 11"));
+        let mut cfg = otry!(get_tool(tool, &vcdir, target, "MSVC 11"));
         let sub = otry!(lib_subdir(target));
         let sdk8 = otry!(get_sdk8_dir());
-        tool.path.push(sdk8.join("bin").join(sub));
+        cfg.path(sdk8.join("bin").join(sub));
         let sdk_lib = sdk8.join("lib").join("win8");
-        tool.libs.push(sdk_lib.join("um").join(sub));
+        cfg.lib(sdk_lib.join("um").join(sub));
         let sdk_include = sdk8.join("include");
-        tool.include.push(sdk_include.join("shared"));
-        tool.include.push(sdk_include.join("um"));
-        tool.include.push(sdk_include.join("winrt"));
-        Some(tool.into_tool())
-    }
-
-    fn add_env(tool: &mut Tool, env: &str, paths: Vec<PathBuf>) {
-        let prev = env::var_os(env).unwrap_or(OsString::new());
-        let prev = env::split_paths(&prev);
-        let new = paths.into_iter().chain(prev);
-        tool.env
-            .push((env.to_string().into(), env::join_paths(new).unwrap()));
+        cfg.include(sdk_include.join("shared"));
+        cfg.include(sdk_include.join("um"));
+        cfg.include(sdk_include.join("winrt"));
+        cfg.exe().map(Tool::new).ok()
     }
 
     // Given a possible MSVC installation directory, we look for the linker and
     // then add the MSVC library path.
-    fn get_tool(tool: &str, path: &Path, target: &str, note: &str) -> Option<MsvcTool> {
+    fn get_tool(tool: &str, path: &Path, target: &str, note: &str) -> Option<Msvc> {
         bin_subdir(target)
             .into_iter()
             .map(|(sub, host)| {
@@ -474,22 +432,22 @@ mod impl_ {
                     path.join("bin").join(host),
                 )
             })
-            .filter_map(|(path, host)| try_exe(path, note).map(|exe| (exe, host)))
-            .map(|(exe, host)| {
-                let mut tool = MsvcTool::new(exe);
-                tool.path.push(host);
-                tool
+            .filter(|&(ref path, _)| path.is_file())
+            .map(|(path, host)| {
+                let mut cfg = Msvc::new(path, note);
+                cfg.path(host);
+                cfg
             })
-            .filter_map(|mut tool| {
+            .filter_map(|mut cfg| {
                 let sub = otry!(vc_lib_subdir(target));
-                tool.libs.push(path.join("lib").join(sub));
-                tool.include.push(path.join("include"));
+                cfg.lib(path.join("lib").join(sub));
+                cfg.include(path.join("include"));
                 let atlmfc_path = path.join("atlmfc");
                 if atlmfc_path.exists() {
-                    tool.libs.push(atlmfc_path.join("lib").join(sub));
-                    tool.include.push(atlmfc_path.join("include"));
+                    cfg.lib(atlmfc_path.join("lib").join(sub));
+                    cfg.include(atlmfc_path.join("include"));
                 }
-                Some(tool)
+                Some(cfg)
             })
             .next()
     }
