@@ -257,7 +257,9 @@ impl ToolFamily {
         // MSVC (`cl.exe`) recognizes `-E`, so `/E` may not be necessary.
         for flag in &["-E", "/E"] {
             // Feed the arguments to the compiler and collect the output.
-            let output = exe.to_command().stderr(Stdio::null()).arg(flag).arg(&input).output()?;
+            let mut cmd = exe.to_command();
+            eprintln!("### detect: cmd: {:?}", cmd);
+            let output = cmd.stderr(Stdio::null()).arg(flag).arg(&input).output()?;
 
             // Check if the compiler run failed.
             if !output.status.success() {
@@ -272,9 +274,11 @@ impl ToolFamily {
             for line in stdout.split(b'\n').filter_map(Result::ok) {
                 // Given that our input is ASCII, we care only if a line is valid ASCII.
                 for line in str::from_utf8(&line[..]) {
+                    eprintln!("### detect: line: '{}'", line.trim());
                     // For a successful parse, stop everything and return the result.
                     // Trim the line for `cl.exe`.
                     for tool_family in line.trim().parse() {
+                        eprintln!("### detect: tool_family: {:?}", tool_family);
                         return Ok(tool_family);
                     }
                 }
