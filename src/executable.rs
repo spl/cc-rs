@@ -275,6 +275,7 @@ pub struct Msvc {
     include_paths: Vec<PathBuf>,
     lib_paths: Vec<PathBuf>,
     path_paths: Vec<PathBuf>,
+    platform: Option<OsString>,
 }
 
 impl Msvc {
@@ -289,6 +290,7 @@ impl Msvc {
             include_paths: Vec::new(),
             lib_paths: Vec::new(),
             path_paths: Vec::new(),
+            platform: None,
         }
     }
 
@@ -307,12 +309,20 @@ impl Msvc {
         self
     }
 
+    pub fn platform<S: Into<OsString>>(&mut self, val: S) -> &mut Self {
+        self.platform.replace(val.into());
+        self
+    }
+
     /// Convert the builder into an executable after performing a spawn test.
     pub fn exe(self) -> Result<Executable, Error> {
         let mut cfg = Build::new(self.requested, self.note);
         Msvc::extend_paths(&mut cfg, "INCLUDE", self.include_paths);
         Msvc::extend_paths(&mut cfg, "LIB", self.lib_paths);
         Msvc::extend_paths(&mut cfg, "PATH", self.path_paths);
+        if let Some(platform) = self.platform {
+            cfg.env("Platform", platform);
+        }
         cfg.exe()
     }
 

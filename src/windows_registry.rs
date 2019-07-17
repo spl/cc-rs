@@ -182,7 +182,7 @@ mod impl_ {
     use std::iter;
     use std::path::{Path, PathBuf};
 
-    use executable::{self, Executable, Msvc};
+    use executable::Msvc;
     use Tool;
 
     fn vs16_instances() -> Box<Iterator<Item=PathBuf>> {
@@ -204,11 +204,11 @@ mod impl_ {
 
     fn find_tool_in_vs16_path(tool: &str, target: &str) -> Option<Tool> {
         vs16_instances().filter_map(|path| {
-            let mut tool = Tool::new(try_exe(path.join(tool), "VS 16")?);
+            let mut cfg = Msvc::new(path.join(tool), "VS 16");
             if target.contains("x86_64") {
-                tool.env.push(("Platform".into(), "X64".into()));
+                cfg.platform("X64");
             }
-            Some(tool)
+            cfg.exe().map(Tool::new).ok()
         }).next()
     }
 
@@ -258,7 +258,7 @@ mod impl_ {
                         .ok()
                         .and_then(|instance| instance.installation_path().ok())
                 })
-                .filter_map(|path| try_exe(PathBuf::from(path).join(tool), "VS 15 via SetupConfiguration"))
+                .filter_map(|path| Msvc::new(PathBuf::from(path).join(tool), "VS 15 via SetupConfiguration").exe().ok())
                 .next(),
             None => None,
         };
@@ -269,7 +269,7 @@ mod impl_ {
                 .open(key.as_ref())
                 .ok()
                 .and_then(|key| key.query_str("15.0").ok())
-                .and_then(|path| try_exe(PathBuf::from(path).join(tool), "VS 15 via registry"))
+                .and_then(|path| Msvc::new(PathBuf::from(path).join(tool), "VS 15 via registry").exe().ok())
         }
 
         exe.map(|exe| {
@@ -697,17 +697,11 @@ mod impl_ {
                 max_version(&key).and_then(|(_vers, key)| key.query_str("MSBuildToolsPath").ok())
             })
             .and_then(|path| {
-                let mut path = PathBuf::from(path);
-                path.push("MSBuild.exe");
-                let mut tool = Tool::new(try_exe(path, "Old MSBuild")?);
+                let mut cfg = Msvc::new(PathBuf::from(path).join("MSBuild.exe"), "Old MSBuild");
                 if target.contains("x86_64") {
-                    tool.env.push(("Platform".into(), "X64".into()));
+                    cfg.platform("X64");
                 }
-                Some(tool)
+                cfg.exe().map(Tool::new).ok()
             })
-    }
-
-    fn try_exe<T: Into<String>>(path: PathBuf, note: T) -> Option<Executable> {
-        executable::Build::new(path, note).exe().ok()
     }
 }

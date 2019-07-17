@@ -1826,7 +1826,7 @@ impl Build {
                         // experience.
                         if tool.family == (ToolFamily::Msvc { clang_cl: true }) && tool.env.len() == 0 {
                             if let Some(registry_tool) = tool_from_registry() {
-                                for (k, v) in registry_tool.env {
+                                for (k, v) in registry_tool.exe.envs() {
                                     tool.env.push((k.to_owned(), v.to_owned()));
                                 }
                             }
