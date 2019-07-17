@@ -232,9 +232,8 @@ pub struct ParseToolFamilyError(());
 impl ToolFamily {
     /// Detect the `ToolFamily` of an `Executable`.
     ///
-    /// This takes an `Executable` instead of a `Command` to obtain the guarantees that the has
-    /// already been checked to run and that the result of `Executable::to_command` has no
-    /// behavior-changing context added to it.
+    /// We use `Executable` instead of `Command` here to ensure that it can run and that
+    /// `Executable::to_command` has no behavior-changing context added to it.
     pub fn detect<P: AsRef<Path>>(out_dir: P, exe: &Executable) -> Result<ToolFamily, Error> {
         // Create a temporary file that will serve as source to the compiler.
         //
@@ -255,19 +254,14 @@ impl ToolFamily {
 
         // Try each of the known flags for expanding preprocessor input.
         //
-        // MSVC (`cl.exe`) recognizes `-E`, so `/E` probably isn't necessary.
+        // MSVC (`cl.exe`) recognizes `-E`, so `/E` may not be necessary.
         for flag in &["-E", "/E"] {
-            let mut cmd = exe.to_command();
+            // Feed the arguments to the compiler and collect the output.
+            let output = exe.to_command().stderr(Stdio::null()).arg(flag).arg(&input).output()?;
 
-            // Feed the above flag and input file path into the compiler.
-            let output = {
-                cmd.arg(flag).arg(input.to_str().unwrap());
-                cmd.output()?
-            };
-
-            // Check if the compiler failed.
+            // Check if the compiler run failed.
             if !output.status.success() {
-                // If it did, we assume it was due to bad arguments. Let's try the next flag.
+                // If the command failed, we assume it was a bad flag and try the next flag.
                 continue;
             }
 
@@ -275,11 +269,12 @@ impl ToolFamily {
             let stdout = BufReader::new(&output.stdout[..]);
 
             // Parse each line of the compiler output.
-            for line in stdout.split(b'\n').filter_map(|l| l.ok()) {
+            for line in stdout.split(b'\n').filter_map(Result::ok) {
                 // Given that our input is ASCII, we care only if a line is valid ASCII.
                 for line in str::from_utf8(&line[..]) {
                     // For a successful parse, stop everything and return the result.
-                    for tool_family in line.parse() {
+                    // Trim the line for `cl.exe`.
+                    for tool_family in line.trim().parse() {
                         return Ok(tool_family);
                     }
                 }
