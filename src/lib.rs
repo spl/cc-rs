@@ -1772,7 +1772,7 @@ impl Build {
         };
 
         // Then, the priority goes to the environment variable (`CC` or `CXX`).
-        let tool: Option<Tool> = match self.env_tool(env) {
+        let tool: Option<Tool> = match self.env_tool(env)? {
             None => None,
             Some((exe, wrapper, args)) => {
                 let mut tool = self.new_compiler(exe)?;
@@ -2037,11 +2037,15 @@ impl Build {
             .collect()
     }
 
-    /// Returns compiler path, optional modifier name from whitelist, and arguments vec
-    fn env_tool(&self, var_name: &str) -> Option<(Executable, Option<Executable>, Vec<String>)> {
+    /// If we can successfully parse the environment variable value, we return a compiler path, an
+    /// optional wrapper, and arguments.
+    ///
+    /// If we find a wrapper but don't find the expected compiler following it, we return an error.
+    fn env_tool(&self, var_name: &str) -> Result<Option<(Executable, Option<Executable>, Vec<String>)>, Error> {
+        // Get the value of the env var.
         let var_value = match self.get_var(var_name) {
             Ok(var_value) => var_value,
-            Err(_) => return None,
+            Err(_) => return Ok(None),
         };
 
         // Format this as a variable for the `Executable` note.
@@ -2055,7 +2059,7 @@ impl Build {
         // interpretation at all, just pass it on through. This'll hopefully get
         // us to support spaces-in-paths.
         if let Ok(exe) = self.build_exe(var_value, var_name).exe() {
-            return Some((exe, None, Vec::new()));
+            return Ok(Some((exe, None, Vec::new())));
         }
 
         // Ok now we want to handle a couple of scenarios. We'll assume from
@@ -2085,36 +2089,42 @@ impl Build {
         // The first part is either a wrapper or a compiler, but we don't know which, yet.
         let first_part = match parts.next() {
             Some(s) => s,
-            None => return None,
+            None => return Ok(None),
         };
         let first_part_exe = match self.build_exe(first_part, format!("{}=\"{}\"", var_name, var_value)).exe() {
             Ok(exe) => exe,
-            Err(_) => return None,
+            Err(_) => return Ok(None),
         };
 
-        let file_stem = Path::new(first_part)
+        // Check for a possible wrapper. If found, check for an executable compiler. If the
+        // compiler is missing or invalid, return an error.
+        let wrapper = Path::new(first_part)
             .file_stem()
             .unwrap()
             .to_str()
             .unwrap();
-        if known_wrappers.contains(&file_stem) {
-            if let Some(name) = parts.next() {
-                // Ensure the second part is an executable.
-                if let Ok(compiler_exe) = self.build_exe(name, var_name).exe() {
-                    return Some((
-                            compiler_exe,
-                            Some(first_part_exe),
-                            parts.map(|s| s.to_string()).collect(),
-                            ));
-                }
-            }
+        if known_wrappers.contains(&wrapper) {
+            // Ensure the second part exists.
+            let name = parts.next().ok_or_else(|| {
+                Error::new(
+                    ErrorKind::ToolNotFound,
+                    &format!("Found wrapper `{}` in `{}` but missing compiler", wrapper, var_name),
+                    )
+            })?;
+            // Ensure the compiler is an executable.
+            let compiler_exe = self.build_exe(name, var_name).exe()?;
+            return Ok(Some((
+                    compiler_exe,
+                    Some(first_part_exe),
+                    parts.map(|s| s.to_string()).collect(),
+                    )));
         }
 
-        Some((
+        Ok(Some((
             first_part_exe,
             None,
             parts.map(|s| s.to_string()).collect(),
-        ))
+        )))
     }
 
     /// Returns the default C++ standard library for the current target: `libc++`

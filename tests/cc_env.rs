@@ -51,26 +51,8 @@ fn ccache_env_flags() {
     test.shim("ccache");
 
     env::set_var("CC", "ccache lol-this-is-not-a-compiler");
-    let compiler = test.gcc().file("foo.c").get_compiler();
-    assert_eq!(compiler.path(), test.which("ccache"));
-    assert_eq!(compiler.cc_env(), "");
-    assert!(
-        compiler
-            .cflags_env()
-            .into_string()
-            .unwrap()
-            .contains("ccache")
-            == false
-    );
-    assert!(
-        compiler
-            .cflags_env()
-            .into_string()
-            .unwrap()
-            .contains(" lol-this-is-not-a-compiler")
-            == false
-    );
-
+    let result = test.gcc().file("foo.c").try_get_compiler();
+    assert!(result.is_err());
     env::set_var("CC", "");
 }
 
