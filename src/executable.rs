@@ -357,6 +357,7 @@ fn canonicalize<P: AsRef<Path>>(path: P) -> Result<PathBuf, std::io::Error> {
     let path = path.as_ref().canonicalize()?;
     Ok(if cfg!(windows) {
         path.to_str()
+            .filter(|s| s.starts_with(r"\\?\"))
             .map(|s| s.get(4..))
             .and_then(|o| o)
             .map(PathBuf::from)
